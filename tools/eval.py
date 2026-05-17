@@ -42,55 +42,58 @@ def do_evaluation(
             compute_metrics=True,
             compute_error_map=cfg.render.vis_error,
         )
-        
-        if log_metrics:
-            eval_dict = {}
-            for k, v in render_results.items():
-                if k in [
-                    "psnr",
-                    "ssim",
-                    "lpips",
-                    "occupied_psnr",
-                    "occupied_ssim",
-                    "masked_psnr",
-                    "masked_ssim",
-                    "human_psnr",
-                    "human_ssim",
-                    "vehicle_psnr",
-                    "vehicle_ssim",
-                ]:
-                    eval_dict[f"image_metrics/test/{k}"] = v
-            if args.enable_wandb:
-                wandb.log(eval_dict)
-            test_metrics_file = f"{cfg.log_dir}/metrics{post_fix}/images_test_{current_time}.json"
-            with open(test_metrics_file, "w") as f:
-                json.dump(eval_dict, f)
-            logger.info(f"Image evaluation metrics saved to {test_metrics_file}")
+        try:
+            if log_metrics:
+                eval_dict = {}
+                for k, v in render_results.items():
+                    if k in [
+                        "psnr",
+                        "ssim",
+                        "lpips",
+                        "occupied_psnr",
+                        "occupied_ssim",
+                        "masked_psnr",
+                        "masked_ssim",
+                        "human_psnr",
+                        "human_ssim",
+                        "vehicle_psnr",
+                        "vehicle_ssim",
+                    ]:
+                        eval_dict[f"image_metrics/test/{k}"] = v
+                if args.enable_wandb:
+                    wandb.log(eval_dict)
+                test_metrics_file = f"{cfg.log_dir}/metrics{post_fix}/images_test_{current_time}.json"
+                with open(test_metrics_file, "w") as f:
+                    json.dump(eval_dict, f)
+                logger.info(f"Image evaluation metrics saved to {test_metrics_file}")
 
-        if args.render_video_postfix is None:
-            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/test_set_{step}.mp4"
-        else:
-            video_output_pth = (
-                f"{cfg.log_dir}/videos{post_fix}/test_set_{step}_{args.render_video_postfix}.mp4"
+            if args.render_video_postfix is None:
+                video_output_pth = f"{cfg.log_dir}/videos{post_fix}/test_set_{step}.mp4"
+            else:
+                video_output_pth = (
+                    f"{cfg.log_dir}/videos{post_fix}/test_set_{step}_{args.render_video_postfix}.mp4"
+                )
+            vis_frame_dict = save_videos(
+                render_results,
+                video_output_pth,
+                layout=dataset.layout,
+                num_timestamps=dataset.num_test_timesteps,
+                keys=render_keys,
+                num_cams=dataset.pixel_source.num_cams,
+                save_seperate_video=cfg.logging.save_seperate_video,
+                fps=2,
+                verbose=True,
+                save_images=False,
             )
-        vis_frame_dict = save_videos(
-            render_results,
-            video_output_pth,
-            layout=dataset.layout,
-            num_timestamps=dataset.num_test_timesteps,
-            keys=render_keys,
-            num_cams=dataset.pixel_source.num_cams,
-            save_seperate_video=cfg.logging.save_seperate_video,
-            fps=2,
-            verbose=True,
-            save_images=False,
-        )
-        if args.enable_wandb:
-            for k, v in vis_frame_dict.items():
-                wandb.log({"image_rendering/test/" + k: wandb.Image(v)})
-        del render_results, vis_frame_dict
+            if args.enable_wandb:
+                for k, v in vis_frame_dict.items():
+                    wandb.log({"image_rendering/test/" + k: wandb.Image(v)})
+        finally:
+            if hasattr(render_results, "cleanup"):
+                render_results.cleanup()
+            del render_results
         torch.cuda.empty_cache()
-        
+
     if cfg.render.render_full:
         logger.info("Evaluating Full Set...")
         render_results = render_images(
@@ -99,52 +102,55 @@ def do_evaluation(
             compute_metrics=True,
             compute_error_map=cfg.render.vis_error,
         )
-        
-        if log_metrics:
-            eval_dict = {}
-            for k, v in render_results.items():
-                if k in [
-                    "psnr",
-                    "ssim",
-                    "lpips",
-                    "occupied_psnr",
-                    "occupied_ssim",
-                    "masked_psnr",
-                    "masked_ssim",
-                    "human_psnr",
-                    "human_ssim",
-                    "vehicle_psnr",
-                    "vehicle_ssim",
-                ]:
-                    eval_dict[f"image_metrics/full/{k}"] = v
-            if args.enable_wandb:
-                wandb.log(eval_dict)
-            full_metrics_file = f"{cfg.log_dir}/metrics{post_fix}/images_full_{current_time}.json"
-            with open(full_metrics_file, "w") as f:
-                json.dump(eval_dict, f)
-            logger.info(f"Image evaluation metrics saved to {full_metrics_file}")
+        try:
+            if log_metrics:
+                eval_dict = {}
+                for k, v in render_results.items():
+                    if k in [
+                        "psnr",
+                        "ssim",
+                        "lpips",
+                        "occupied_psnr",
+                        "occupied_ssim",
+                        "masked_psnr",
+                        "masked_ssim",
+                        "human_psnr",
+                        "human_ssim",
+                        "vehicle_psnr",
+                        "vehicle_ssim",
+                    ]:
+                        eval_dict[f"image_metrics/full/{k}"] = v
+                if args.enable_wandb:
+                    wandb.log(eval_dict)
+                full_metrics_file = f"{cfg.log_dir}/metrics{post_fix}/images_full_{current_time}.json"
+                with open(full_metrics_file, "w") as f:
+                    json.dump(eval_dict, f)
+                logger.info(f"Image evaluation metrics saved to {full_metrics_file}")
 
-        if args.render_video_postfix is None:
-            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/full_set_{step}.mp4"
-        else:
-            video_output_pth = (
-                f"{cfg.log_dir}/videos{post_fix}/full_set_{step}_{args.render_video_postfix}.mp4"
+            if args.render_video_postfix is None:
+                video_output_pth = f"{cfg.log_dir}/videos{post_fix}/full_set_{step}.mp4"
+            else:
+                video_output_pth = (
+                    f"{cfg.log_dir}/videos{post_fix}/full_set_{step}_{args.render_video_postfix}.mp4"
+                )
+            vis_frame_dict = save_videos(
+                render_results,
+                video_output_pth,
+                layout=dataset.layout,
+                num_timestamps=dataset.num_img_timesteps,
+                keys=render_keys,
+                num_cams=dataset.pixel_source.num_cams,
+                save_seperate_video=cfg.logging.save_seperate_video,
+                fps=cfg.render.fps,
+                verbose=True,
             )
-        vis_frame_dict = save_videos(
-            render_results,
-            video_output_pth,
-            layout=dataset.layout,
-            num_timestamps=dataset.num_img_timesteps,
-            keys=render_keys,
-            num_cams=dataset.pixel_source.num_cams,
-            save_seperate_video=cfg.logging.save_seperate_video,
-            fps=cfg.render.fps,
-            verbose=True,
-        )
-        if args.enable_wandb:
-            for k, v in vis_frame_dict.items():
-                wandb.log({"image_rendering/full/" + k: wandb.Image(v)})
-        del render_results, vis_frame_dict
+            if args.enable_wandb:
+                for k, v in vis_frame_dict.items():
+                    wandb.log({"image_rendering/full/" + k: wandb.Image(v)})
+        finally:
+            if hasattr(render_results, "cleanup"):
+                render_results.cleanup()
+            del render_results
         torch.cuda.empty_cache()
     
     render_novel_cfg = cfg.render.get("render_novel", None)

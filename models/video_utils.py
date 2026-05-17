@@ -1,7 +1,9 @@
-from typing import Literal, Dict, List, Optional, Callable
+from typing import Literal, Dict, List, Optional, Callable, Iterator, Tuple, Any
 from tqdm import tqdm, trange
 import numpy as np
 import os
+import shutil
+import tempfile
 import logging
 import imageio
 
@@ -24,6 +26,125 @@ def get_numpy(x: Tensor) -> np.ndarray:
 
 def non_zero_mean(x: Tensor) -> float:
     return sum(x) / len(x) if len(x) > 0 else -1
+
+
+class _LazyFrameList:
+    """Read-only sequence backed by per-frame .npy files on disk.
+
+    Supports integer indexing and slicing, with the same shape contract as a
+    list of numpy arrays. Files are loaded just-in-time, so peak memory is
+    bounded by the size of the slice being read.
+    """
+
+    __slots__ = ("_dir", "_count")
+
+    def __init__(self, dir_path: str, count: int):
+        self._dir = dir_path
+        self._count = count
+
+    def __len__(self) -> int:
+        return self._count
+
+    def _load(self, idx: int) -> np.ndarray:
+        return np.load(os.path.join(self._dir, f"{idx:06d}.npy"))
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return [self._load(i) for i in range(*key.indices(self._count))]
+        if isinstance(key, int):
+            if key < 0:
+                key += self._count
+            if key < 0 or key >= self._count:
+                raise IndexError(key)
+            return self._load(key)
+        raise TypeError(f"_LazyFrameList index must be int or slice, got {type(key)}")
+
+
+class RenderResults:
+    """Container that mimics the previous render() dict return value.
+
+    Scalar metrics and small per-frame metadata stay in memory; full-resolution
+    per-frame tensors are streamed to a temporary directory and read lazily on
+    access. The public surface (`key in results`, `results[key]`,
+    `len(results[key])`, `results.items()`) matches the patterns used by
+    save_videos() and tools/eval.py, so call sites are unchanged.
+    """
+
+    # In-memory keys (scalar metrics + small metadata). Anything not here
+    # is treated as a per-frame stream and stored on disk.
+    _IN_MEMORY_KEYS = frozenset({
+        "psnr", "ssim", "lpips",
+        "occupied_psnr", "occupied_ssim",
+        "masked_psnr", "masked_ssim",
+        "human_psnr", "human_ssim",
+        "vehicle_psnr", "vehicle_ssim",
+        "cam_names", "cam_ids",
+    })
+
+    def __init__(self, tmpdir: Optional[str] = None):
+        if tmpdir is None:
+            base = os.environ.get("DRIVESTUDIO_RENDER_TMP", None)
+            self._tmp = tempfile.mkdtemp(prefix="drivestudio_render_", dir=base)
+            self._owns_tmp = True
+        else:
+            os.makedirs(tmpdir, exist_ok=True)
+            self._tmp = tmpdir
+            self._owns_tmp = False
+        self._scalars: Dict[str, Any] = {}
+        # frame_key -> number of frames written
+        self._frame_counts: Dict[str, int] = {}
+
+    @property
+    def tmpdir(self) -> str:
+        return self._tmp
+
+    def set_scalar(self, key: str, value: Any) -> None:
+        self._scalars[key] = value
+
+    def append_frame(self, key: str, arr: np.ndarray) -> None:
+        """Append one frame to the on-disk stream for `key`."""
+        sub = os.path.join(self._tmp, key)
+        idx = self._frame_counts.get(key, 0)
+        if idx == 0:
+            os.makedirs(sub, exist_ok=True)
+        np.save(os.path.join(sub, f"{idx:06d}.npy"), arr)
+        self._frame_counts[key] = idx + 1
+
+    def has_frames(self, key: str) -> bool:
+        return self._frame_counts.get(key, 0) > 0
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._scalars or self._frame_counts.get(key, 0) > 0
+
+    def __getitem__(self, key: str):
+        if key in self._scalars:
+            return self._scalars[key]
+        if key in self._frame_counts:
+            return _LazyFrameList(os.path.join(self._tmp, key), self._frame_counts[key])
+        raise KeyError(key)
+
+    def items(self) -> Iterator[Tuple[str, Any]]:
+        # Only iterate in-memory scalars/metadata. Frame streams are accessed
+        # by explicit key. This matches the only `.items()` call site in
+        # tools/eval.py, which filters to a whitelist of metric keys.
+        return iter(self._scalars.items())
+
+    def cleanup(self) -> None:
+        if self._owns_tmp and os.path.isdir(self._tmp):
+            shutil.rmtree(self._tmp, ignore_errors=True)
+        self._frame_counts.clear()
+
+    def __enter__(self) -> "RenderResults":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.cleanup()
+
+    def __del__(self):
+        try:
+            self.cleanup()
+        except Exception:
+            pass
 
 def compute_psnr(prediction: Tensor, target: Tensor) -> float:
     """
@@ -101,21 +222,9 @@ def render(
         compute_error_map: Optional; if True, the function will compute and return error maps. Default is False.
         vis_indices: Optional; if not None, the function will only render the specified indices. Default is None.
     """
-    # rgbs
-    rgbs, gt_rgbs, rgb_sky_blend, rgb_sky = [], [], [], []
-    Background_rgbs, RigidNodes_rgbs, DeformableNodes_rgbs, SMPLNodes_rgbs, Dynamic_rgbs = [], [], [], [], []
-    error_maps = []
-
-    # depths
-    depths, lidar_on_images = [], []
-    Background_depths, RigidNodes_depths, DeformableNodes_depths, SMPLNodes_depths, Dynamic_depths = [], [], [], [], []
-
-    # sky
-    opacities, sky_masks = [], []
-    Background_opacities, RigidNodes_opacities, DeformableNodes_opacities, SMPLNodes_opacities, Dynamic_opacities = [], [], [], [], []
-    
-    # misc
-    cam_names, cam_ids = [], []
+    render_results = RenderResults()
+    cam_names: List[Any] = []
+    cam_ids: List[Any] = []
 
     if compute_metrics:
         psnrs, ssim_scores, lpipss = [], [], []
@@ -138,12 +247,12 @@ def render(
                     cam_infos[k] = v.cuda(non_blocking=True)
             # render the image
             results = trainer(image_infos, cam_infos)
-            
+
             # ------------- clip rgb ------------- #
             for k, v in results.items():
                 if isinstance(v, Tensor) and "rgb" in k:
                     results[k] = v.clamp(0., 1.)
-            
+
             # ------------- cam names ------------- #
             cam_names.append(cam_infos["cam_name"])
             cam_ids.append(
@@ -152,73 +261,71 @@ def render(
 
             # ------------- rgb ------------- #
             rgb = results["rgb"]
-            rgbs.append(get_numpy(rgb))
+            render_results.append_frame("rgbs", get_numpy(rgb))
             if "pixels" in image_infos:
-                gt_rgbs.append(get_numpy(image_infos["pixels"]))
-                
+                render_results.append_frame("gt_rgbs", get_numpy(image_infos["pixels"]))
+
             green_background = torch.tensor([0.0, 177, 64]) / 255.0
             green_background = green_background.to(rgb.device)
             if "Background_rgb" in results:
                 Background_rgb = results["Background_rgb"] * results[
                     "Background_opacity"
                 ] + green_background * (1 - results["Background_opacity"])
-                Background_rgbs.append(get_numpy(Background_rgb))
+                render_results.append_frame("Background_rgbs", get_numpy(Background_rgb))
             if "RigidNodes_rgb" in results:
                 RigidNodes_rgb = results["RigidNodes_rgb"] * results[
                     "RigidNodes_opacity"
                 ] + green_background * (1 - results["RigidNodes_opacity"])
-                RigidNodes_rgbs.append(get_numpy(RigidNodes_rgb))
+                render_results.append_frame("RigidNodes_rgbs", get_numpy(RigidNodes_rgb))
             if "DeformableNodes_rgb" in results:
                 DeformableNodes_rgb = results["DeformableNodes_rgb"] * results[
                     "DeformableNodes_opacity"
                 ] + green_background * (1 - results["DeformableNodes_opacity"])
-                DeformableNodes_rgbs.append(get_numpy(DeformableNodes_rgb))
+                render_results.append_frame("DeformableNodes_rgbs", get_numpy(DeformableNodes_rgb))
             if "SMPLNodes_rgb" in results:
                 SMPLNodes_rgb = results["SMPLNodes_rgb"] * results[
                     "SMPLNodes_opacity"
                 ] + green_background * (1 - results["SMPLNodes_opacity"])
-                SMPLNodes_rgbs.append(get_numpy(SMPLNodes_rgb))
+                render_results.append_frame("SMPLNodes_rgbs", get_numpy(SMPLNodes_rgb))
             if "Dynamic_rgb" in results:
                 Dynamic_rgb = results["Dynamic_rgb"] * results[
                     "Dynamic_opacity"
                 ] + green_background * (1 - results["Dynamic_opacity"])
-                Dynamic_rgbs.append(get_numpy(Dynamic_rgb))
+                render_results.append_frame("Dynamic_rgbs", get_numpy(Dynamic_rgb))
             if compute_error_map:
-                # cal mean squared error
                 error_map = (rgb - image_infos["pixels"]) ** 2
                 error_map = error_map.mean(dim=-1, keepdim=True)
-                # scale
                 error_map = (error_map - error_map.min()) / (error_map.max() - error_map.min())
                 error_map = error_map.repeat_interleave(3, dim=-1)
-                error_maps.append(get_numpy(error_map))
+                render_results.append_frame("rgb_error_maps", get_numpy(error_map))
             if "rgb_sky_blend" in results:
-                rgb_sky_blend.append(get_numpy(results["rgb_sky_blend"]))
+                render_results.append_frame("rgb_sky_blend", get_numpy(results["rgb_sky_blend"]))
             if "rgb_sky" in results:
-                rgb_sky.append(get_numpy(results["rgb_sky"]))
+                render_results.append_frame("rgb_sky", get_numpy(results["rgb_sky"]))
             # ------------- depth ------------- #
             depth = results["depth"]
-            depths.append(get_numpy(depth))
+            render_results.append_frame("depths", get_numpy(depth))
             # ------------- mask ------------- #
             if "opacity" in results:
-                opacities.append(get_numpy(results["opacity"]))
+                render_results.append_frame("opacities", get_numpy(results["opacity"]))
             if "Background_depth" in results:
-                Background_depths.append(get_numpy(results["Background_depth"]))
-                Background_opacities.append(get_numpy(results["Background_opacity"]))
+                render_results.append_frame("Background_depths", get_numpy(results["Background_depth"]))
+                render_results.append_frame("Background_opacities", get_numpy(results["Background_opacity"]))
             if "RigidNodes_depth" in results:
-                RigidNodes_depths.append(get_numpy(results["RigidNodes_depth"]))
-                RigidNodes_opacities.append(get_numpy(results["RigidNodes_opacity"]))
+                render_results.append_frame("RigidNodes_depths", get_numpy(results["RigidNodes_depth"]))
+                render_results.append_frame("RigidNodes_opacities", get_numpy(results["RigidNodes_opacity"]))
             if "DeformableNodes_depth" in results:
-                DeformableNodes_depths.append(get_numpy(results["DeformableNodes_depth"]))
-                DeformableNodes_opacities.append(get_numpy(results["DeformableNodes_opacity"]))
+                render_results.append_frame("DeformableNodes_depths", get_numpy(results["DeformableNodes_depth"]))
+                render_results.append_frame("DeformableNodes_opacities", get_numpy(results["DeformableNodes_opacity"]))
             if "SMPLNodes_depth" in results:
-                SMPLNodes_depths.append(get_numpy(results["SMPLNodes_depth"]))
-                SMPLNodes_opacities.append(get_numpy(results["SMPLNodes_opacity"]))
+                render_results.append_frame("SMPLNodes_depths", get_numpy(results["SMPLNodes_depth"]))
+                render_results.append_frame("SMPLNodes_opacities", get_numpy(results["SMPLNodes_opacity"]))
             if "Dynamic_depth" in results:
-                Dynamic_depths.append(get_numpy(results["Dynamic_depth"]))
-                Dynamic_opacities.append(get_numpy(results["Dynamic_opacity"]))
+                render_results.append_frame("Dynamic_depths", get_numpy(results["Dynamic_depth"]))
+                render_results.append_frame("Dynamic_opacities", get_numpy(results["Dynamic_opacity"]))
             if "sky_masks" in image_infos:
-                sky_masks.append(get_numpy(image_infos["sky_masks"]))
-                
+                render_results.append_frame("gt_sky_masks", get_numpy(image_infos["sky_masks"]))
+
             # ------------- lidar ------------- #
             if "lidar_depth_map" in image_infos:
                 depth_map = image_infos["lidar_depth_map"]
@@ -226,7 +333,7 @@ def render(
                 depth_img = depth_visualizer(depth_img, depth_img > 0)
                 mask = (depth_map.unsqueeze(-1) > 0).cpu().numpy()
                 lidar_on_image = image_infos["pixels"].cpu().numpy() * (1 - mask) + depth_img * mask
-                lidar_on_images.append(lidar_on_image)
+                render_results.append_frame("lidar_on_images", lidar_on_image)
 
             if compute_metrics:
                 psnr = compute_psnr(rgb, image_infos["pixels"])
@@ -317,68 +424,20 @@ def render(
                             )[1][vehicle_mask].mean()
                         )
 
-    # messy aggregation...
-    results_dict = {}
-    results_dict["psnr"] = non_zero_mean(psnrs) if compute_metrics else -1
-    results_dict["ssim"] = non_zero_mean(ssim_scores) if compute_metrics else -1
-    results_dict["lpips"] = non_zero_mean(lpipss) if compute_metrics else -1
-    results_dict["occupied_psnr"] = non_zero_mean(occupied_psnrs) if compute_metrics else -1
-    results_dict["occupied_ssim"] = non_zero_mean(occupied_ssims) if compute_metrics else -1
-    results_dict["masked_psnr"] = non_zero_mean(masked_psnrs) if compute_metrics else -1
-    results_dict["masked_ssim"] = non_zero_mean(masked_ssims) if compute_metrics else -1
-    results_dict["human_psnr"] = non_zero_mean(human_psnrs) if compute_metrics else -1
-    results_dict["human_ssim"] = non_zero_mean(human_ssims) if compute_metrics else -1
-    results_dict["vehicle_psnr"] = non_zero_mean(vehicle_psnrs) if compute_metrics else -1
-    results_dict["vehicle_ssim"] = non_zero_mean(vehicle_ssims) if compute_metrics else -1
-    results_dict["rgbs"] = rgbs
-    results_dict["depths"] = depths
-    results_dict["cam_names"] = cam_names
-    results_dict["cam_ids"] = cam_ids
-    if len(opacities) > 0:
-        results_dict["opacities"] = opacities
-    if len(gt_rgbs) > 0:
-        results_dict["gt_rgbs"] = gt_rgbs
-    if len(error_maps) > 0:
-        results_dict["rgb_error_maps"] = error_maps
-    if len(rgb_sky_blend) > 0:
-        results_dict["rgb_sky_blend"] = rgb_sky_blend
-    if len(rgb_sky) > 0:
-        results_dict["rgb_sky"] = rgb_sky
-    if len(sky_masks) > 0:
-        results_dict["gt_sky_masks"] = sky_masks
-    if len(lidar_on_images) > 0:
-        results_dict["lidar_on_images"] = lidar_on_images
-    if len(Background_rgbs) > 0:
-        results_dict["Background_rgbs"] = Background_rgbs
-    if len(RigidNodes_rgbs) > 0:
-        results_dict["RigidNodes_rgbs"] = RigidNodes_rgbs
-    if len(DeformableNodes_rgbs) > 0:
-        results_dict["DeformableNodes_rgbs"] = DeformableNodes_rgbs
-    if len(SMPLNodes_rgbs) > 0:
-        results_dict["SMPLNodes_rgbs"] = SMPLNodes_rgbs
-    if len(Dynamic_rgbs) > 0:
-        results_dict["Dynamic_rgbs"] = Dynamic_rgbs
-    if len(Background_depths) > 0:
-        results_dict["Background_depths"] = Background_depths
-    if len(RigidNodes_depths) > 0:
-        results_dict["RigidNodes_depths"] = RigidNodes_depths
-    if len(DeformableNodes_depths) > 0:
-        results_dict["DeformableNodes_depths"] = DeformableNodes_depths
-    if len(SMPLNodes_depths) > 0:
-        results_dict["SMPLNodes_depths"] = SMPLNodes_depths
-    if len(Dynamic_depths) > 0:
-        results_dict["Dynamic_depths"] = Dynamic_depths
-    if len(Background_opacities) > 0:
-        results_dict["Background_opacities"] = Background_opacities
-    if len(RigidNodes_opacities) > 0:
-        results_dict["RigidNodes_opacities"] = RigidNodes_opacities
-    if len(DeformableNodes_opacities) > 0:
-        results_dict["DeformableNodes_opacities"] = DeformableNodes_opacities
-    if len(SMPLNodes_opacities) > 0:
-        results_dict["SMPLNodes_opacities"] = SMPLNodes_opacities
-    if len(Dynamic_opacities) > 0:
-        results_dict["Dynamic_opacities"] = Dynamic_opacities
-    return results_dict
+    render_results.set_scalar("psnr", non_zero_mean(psnrs) if compute_metrics else -1)
+    render_results.set_scalar("ssim", non_zero_mean(ssim_scores) if compute_metrics else -1)
+    render_results.set_scalar("lpips", non_zero_mean(lpipss) if compute_metrics else -1)
+    render_results.set_scalar("occupied_psnr", non_zero_mean(occupied_psnrs) if compute_metrics else -1)
+    render_results.set_scalar("occupied_ssim", non_zero_mean(occupied_ssims) if compute_metrics else -1)
+    render_results.set_scalar("masked_psnr", non_zero_mean(masked_psnrs) if compute_metrics else -1)
+    render_results.set_scalar("masked_ssim", non_zero_mean(masked_ssims) if compute_metrics else -1)
+    render_results.set_scalar("human_psnr", non_zero_mean(human_psnrs) if compute_metrics else -1)
+    render_results.set_scalar("human_ssim", non_zero_mean(human_ssims) if compute_metrics else -1)
+    render_results.set_scalar("vehicle_psnr", non_zero_mean(vehicle_psnrs) if compute_metrics else -1)
+    render_results.set_scalar("vehicle_ssim", non_zero_mean(vehicle_ssims) if compute_metrics else -1)
+    render_results.set_scalar("cam_names", cam_names)
+    render_results.set_scalar("cam_ids", cam_ids)
+    return render_results
 
 
 def save_videos(
