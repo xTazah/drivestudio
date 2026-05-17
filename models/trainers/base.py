@@ -527,13 +527,18 @@ class BasicTrainer(nn.Module):
         if "egocar_masks" in image_infos:
             # in the case of egocar, we need to mask out the egocar region
             valid_loss_mask = (1.0 - image_infos["egocar_masks"]).float()
-        else:
+        elif "sky_masks" in image_infos:
             valid_loss_mask = torch.ones_like(image_infos["sky_masks"])
-            
+        else:
+            valid_loss_mask = torch.ones_like(image_infos["pixels"][..., 0])
+
         gt_rgb = image_infos["pixels"] * valid_loss_mask[..., None]
         predicted_rgb = outputs["rgb"] * valid_loss_mask[..., None]
-        
-        gt_occupied_mask = (1.0 - image_infos["sky_masks"]).float() * valid_loss_mask
+
+        if "sky_masks" in image_infos:
+            gt_occupied_mask = (1.0 - image_infos["sky_masks"]).float() * valid_loss_mask
+        else:
+            gt_occupied_mask = valid_loss_mask
         pred_occupied_mask = outputs["opacity"].squeeze() * valid_loss_mask
         
         # rgb loss
