@@ -17,13 +17,39 @@ from datasets.base.pixel_source import ScenePixelSource, CameraData
 
 logger = logging.getLogger()
 
-# define each class's node type
+# Default class -> node-type mapping. Override per-run via
+#   data.pixel_source.object_class_node_mapping:
+#     Vehicle: RigidNodes
+#     Pedestrian: RigidNodes   # e.g. B0: pedestrians treated as rigid
+#     Cyclist: RigidNodes
+# Values are case-sensitive ModelType member names ("RigidNodes",
+# "DeformableNodes", "SMPLNodes"). Classes omitted from an override keep
+# their default mapping; pass an empty dict to keep all defaults.
 OBJECT_CLASS_NODE_MAPPING = {
     "Vehicle": ModelType.RigidNodes,
     "Pedestrian": ModelType.SMPLNodes,
     "Cyclist": ModelType.DeformableNodes
 }
 SMPLNODE_CLASSES = ["Pedestrian"]
+
+
+def _resolve_class_node_mapping(cfg_override) -> Dict[str, "ModelType"]:
+    mapping = dict(OBJECT_CLASS_NODE_MAPPING)
+    if cfg_override is None:
+        return mapping
+    for class_name, node_type_name in dict(cfg_override).items():
+        if class_name not in mapping:
+            logger.warning(
+                f"object_class_node_mapping: unknown class '{class_name}', ignoring"
+            )
+            continue
+        if not hasattr(ModelType, node_type_name):
+            raise ValueError(
+                f"object_class_node_mapping['{class_name}']: "
+                f"'{node_type_name}' is not a valid ModelType member"
+            )
+        mapping[class_name] = getattr(ModelType, node_type_name)
+    return mapping
 
 # OpenCV to Dataset coordinate transformation
 # opencv coordinate system: x right, y down, z front
@@ -218,12 +244,17 @@ class WaymoPixelSource(ScenePixelSource):
         instances_size = np.zeros((num_full_frames, num_instances, 3))
         instances_true_id = np.arange(num_instances)
         instances_model_types = np.ones(num_instances) * -1
-        
+
+        class_node_mapping = _resolve_class_node_mapping(
+            self.data_cfg.get("object_class_node_mapping", None)
+        )
+        logger.info(f"Object class -> node-type mapping: { {k: v.name for k, v in class_node_mapping.items()} }")
+
         ego_to_world_start = np.loadtxt(
             os.path.join(self.data_path, "ego_pose", f"{self.start_timestep:03d}.txt")
         )
         for k, v in instances_info.items():
-            instances_model_types[int(k)] = OBJECT_CLASS_NODE_MAPPING[v["class_name"]]
+            instances_model_types[int(k)] = class_node_mapping[v["class_name"]]
             for frame_idx, obj_to_world, box_size in zip(v["frame_annotations"]["frame_idx"], v["frame_annotations"]["obj_to_world"], v["frame_annotations"]["box_size"]):
                 # the first ego pose as the origin of the world coordinate system.
                 obj_to_world = np.array(obj_to_world).reshape(4, 4)
