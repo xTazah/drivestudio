@@ -320,3 +320,24 @@ class PartRigidNodes(SMPLNodes):
         self.point_segment_ids  = self.point_segment_ids[~culls]
         logger.info(f"     Cull: {n_bef - self.num_points}")
         return culls
+
+    def compute_reg_loss(self) -> Dict[str, torch.Tensor]:
+        # Skip SMPLNodes' knn/voxel/joint_smooth reg losses (don't apply here).
+        # Go straight to RigidNodes.compute_reg_loss for sharp_shape_reg and
+        # the per-frame trans temporal smoothness.
+        from models.nodes.rigid import RigidNodes
+        loss_dict = RigidNodes.compute_reg_loss(self)
+
+        residual_reg = self.reg_cfg.get("residual_reg", None)
+        if residual_reg is not None and self.refine_pose:
+            w_rot = residual_reg.get("w_rot", 0.0)
+            w_trans = residual_reg.get("w_trans", 0.0)
+            if w_rot > 0:
+                # Penalize departure from identity quaternion [1,0,0,0].
+                # 1 - q[0]^2 is proportional to ||R - I||^2 for unit quats.
+                q = self.seg_quat_residuals
+                q = q / q.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+                loss_dict["seg_residual_rot"] = (1.0 - q[..., 0] ** 2).mean() * w_rot
+            if w_trans > 0:
+                loss_dict["seg_residual_trans"] = self.seg_trans_residuals.pow(2).mean() * w_trans
+        return loss_dict

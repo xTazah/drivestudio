@@ -1,0 +1,40 @@
+# Waymo dataset configuration — Method M variant
+#
+# Pedestrians routed to PartRigidNodes (the M / M-noref node type).
+# Vehicles and cyclists stay on RigidNodes (matches B0 for fair comparison
+# on those classes).
+
+data:
+  data_root: data/waymo/processed/training
+  dataset: waymo
+  scene_idx: 0
+  start_timestep: 0
+  end_timestep: -1
+  preload_device: cuda
+  pixel_source:
+    type: datasets.waymo.waymo_sourceloader.WaymoPixelSource
+    cameras: [0]
+    downscale_when_loading: [1]
+    downscale: 1
+    undistort: True
+    test_image_stride: 0
+    load_sky_mask: True
+    load_dynamic_mask: True
+    load_objects: True
+    load_smpl: True
+    object_class_node_mapping:
+      Vehicle: RigidNodes
+      Pedestrian: PartRigidNodes
+      Cyclist: RigidNodes
+    sampler:
+      buffer_downscale: 8
+      buffer_ratio: 0.5
+      start_enhance_weight: 3
+  lidar_source:
+    type: datasets.waymo.waymo_sourceloader.WaymoLiDARSource
+    load_lidar: True
+    only_use_top_lidar: False
+    truncated_max_range: 80
+    truncated_min_range: -2
+    lidar_downsample_factor: 4
+    lidar_percentile: 0.02
