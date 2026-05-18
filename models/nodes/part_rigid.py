@@ -276,3 +276,47 @@ class PartRigidNodes(SMPLNodes):
         self.seg_trans_residuals = Parameter(seg_t, requires_grad=self.refine_pose)
         msg = super().load_state_dict(state_dict, **kwargs)
         return msg
+
+    # ------------------------------------------------------------------
+    # Densification hooks: keep point_segment_ids in lockstep with point_ids.
+    # ------------------------------------------------------------------
+    def split_gaussians(self, split_mask: torch.Tensor, samps: int = 2):
+        out = super().split_gaussians(split_mask, samps)
+        new_segments = self.point_segment_ids[split_mask].repeat(samps)
+        self.point_segment_ids = torch.cat([self.point_segment_ids, new_segments], dim=0)
+        return out
+
+    def dup_gaussians(self, dup_mask: torch.Tensor):
+        out = super().dup_gaussians(dup_mask)
+        new_segments = self.point_segment_ids[dup_mask]
+        self.point_segment_ids = torch.cat([self.point_segment_ids, new_segments], dim=0)
+        return out
+
+    def cull_gaussians(self):
+        """Re-implements RigidNodes.cull_gaussians to also mask point_segment_ids.
+
+        Keep this in sync with RigidNodes.cull_gaussians (models/nodes/rigid.py).
+        """
+        n_bef = self.num_points
+        culls = (self.get_opacity.data < self.ctrl_cfg.cull_alpha_thresh).squeeze()
+        if self.ctrl_cfg.cull_out_of_bound:
+            culls = culls | self.get_out_of_bound_mask()
+        if self.step > self.ctrl_cfg.reset_alpha_interval:
+            toobigs = (
+                torch.exp(self._scales).max(dim=-1).values
+                > self.ctrl_cfg.cull_scale_thresh * self.scene_scale
+            ).squeeze()
+            culls = culls | toobigs
+            if self.step < self.ctrl_cfg.stop_screen_size_at:
+                assert self.max_2Dsize is not None
+                culls = culls | (self.max_2Dsize > self.ctrl_cfg.cull_screen_size).squeeze()
+        self._means         = Parameter(self._means[~culls].detach())
+        self._scales        = Parameter(self._scales[~culls].detach())
+        self._quats         = Parameter(self._quats[~culls].detach())
+        self._features_dc   = Parameter(self._features_dc[~culls].detach())
+        self._features_rest = Parameter(self._features_rest[~culls].detach())
+        self._opacities     = Parameter(self._opacities[~culls].detach())
+        self.point_ids          = self.point_ids[~culls]
+        self.point_segment_ids  = self.point_segment_ids[~culls]
+        logger.info(f"     Cull: {n_bef - self.num_points}")
+        return culls
