@@ -13,6 +13,8 @@ from typing import Dict, List
 import torch
 from torch.nn import Parameter
 
+from models.gaussians.basics import matrix_to_quaternion, quat_mult
+from models.human_body import quaternion_to_matrix
 from models.nodes.smpl import SMPLNodes
 
 logger = logging.getLogger()
@@ -48,6 +50,66 @@ for seg_id, (_, _, joints) in enumerate(SEGMENT_TABLE):
         _joint_to_segment[j] = seg_id
 assert all(s >= 0 for s in _joint_to_segment), f"unassigned joints: {_joint_to_segment}"
 JOINT_TO_SEGMENT = torch.tensor(_joint_to_segment, dtype=torch.long)
+
+
+def _forward_kinematics(
+    rot_mats: torch.Tensor,
+    joints_canonical: torch.Tensor,
+    parents: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compute per-joint world-space SE(3) transforms along the SMPL kintree.
+
+    Args:
+        rot_mats: (B, 24, 3, 3) per-joint local rotation matrices.
+        joints_canonical: (B, 24, 3) joint positions in T-pose.
+        parents: (24,) long, parents[j] is parent joint index of joint j; parents[0] = -1.
+
+    Returns:
+        T_world: (B, 24, 4, 4). T_world[:, j] maps a point in joint j's local
+                 (T-pose-centered) frame to canonical world space.
+    """
+    B, J = rot_mats.shape[0], rot_mats.shape[1]
+    rel_joints = joints_canonical.clone()
+    rel_joints[:, 1:] = rel_joints[:, 1:] - joints_canonical[:, parents[1:]]
+
+    eye = torch.eye(4, dtype=rot_mats.dtype, device=rot_mats.device)
+    local = eye.repeat(B, J, 1, 1)
+    local[:, :, :3, :3] = rot_mats
+    local[:, :, :3,  3] = rel_joints
+
+    T_world = [local[:, 0]]
+    for j in range(1, J):
+        T_world.append(torch.matmul(T_world[parents[j]], local[:, j]))
+    return torch.stack(T_world, dim=1)
+
+
+def _apply_residuals(
+    quats_24: torch.Tensor,
+    seg_quat_residuals: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compose per-segment residual quaternions onto the per-joint data quaternions
+    at each segment's anchor joint only. Non-anchor joints pass through unchanged;
+    the parent chain in FK propagates the residual to descendants in the same segment.
+
+    Args:
+        quats_24: (B, 24, 4) per-instance per-joint data quaternions.
+        seg_quat_residuals: (B, 10, 4) residuals applied at anchors.
+
+    Returns:
+        (B, 24, 4) corrected quaternions.
+    """
+    out = quats_24.clone()
+    eps = 1e-8
+    for seg_id in range(NUM_SEGMENTS):
+        anchor = SEGMENT_ANCHORS[seg_id].item()
+        r = seg_quat_residuals[:, seg_id]
+        r = r / r.norm(dim=-1, keepdim=True).clamp_min(eps)
+        d = quats_24[:, anchor]
+        d = d / d.norm(dim=-1, keepdim=True).clamp_min(eps)
+        out[:, anchor] = quat_mult(r, d)
+    return out
 
 
 class PartRigidNodes(SMPLNodes):
@@ -123,3 +185,94 @@ class PartRigidNodes(SMPLNodes):
             f"Per-segment vertex counts (instance 0): "
             f"{[int((per_vertex_seg[0] == s).sum()) for s in range(NUM_SEGMENTS)]}"
         )
+
+    def transform_means_and_quats(
+        self, means: torch.Tensor, quats: torch.Tensor,
+    ):
+        """
+        Compute world-space means and orientations for all Gaussians at cur_frame
+        via per-segment FK on the SMPL kintree.
+        """
+        assert means.shape[0] == self.point_ids.shape[0], "shape mismatch on means"
+        cur = self.cur_frame
+        instance_mask = self.instances_fv[cur]                # (B,)
+
+        # Gather per-instance per-joint data quats: root + 23 body joints.
+        root_q = self.instances_quats[cur]                     # (B, 1, 4)
+        body_q = self.smpl_qauts[cur]                          # (B, 23, 4)
+        full_q = torch.cat([root_q, body_q], dim=1)            # (B, 24, 4)
+        full_q = self.quat_act(full_q)
+
+        # Apply per-segment residuals (no-op if refine_pose=False — params frozen at identity).
+        full_q = _apply_residuals(full_q, self.seg_quat_residuals)
+
+        # FK along kintree.
+        parents = self.template._template_layer.parents        # (24,)
+        rot_mats = quaternion_to_matrix(full_q)                # (B, 24, 3, 3)
+        J_can = self.template.J_canonical                      # (B, 24, 3)
+        T_joint = _forward_kinematics(rot_mats, J_can, parents)  # (B, 24, 4, 4)
+
+        # Per-instance world translation.
+        trans_cur = self.instances_trans[cur]                  # (B, 3)
+
+        # Per-segment world transforms: pick anchor-joint transform for each segment.
+        anchors = SEGMENT_ANCHORS.to(T_joint.device)
+        T_seg = T_joint[:, anchors].clone()                    # (B, 10, 4, 4)
+        # Apply per-segment translation residual to anchor world position.
+        T_seg[..., :3, 3] = T_seg[..., :3, 3] + self.seg_trans_residuals
+
+        # Per-Gaussian transform lookup.
+        ins_id = self.point_ids[..., 0]                        # (N,)
+        seg_id = self.point_segment_ids                        # (N,)
+        T_per_pt = T_seg[ins_id, seg_id]                       # (N, 4, 4)
+        R_per_pt = T_per_pt[..., :3, :3]                       # (N, 3, 3)
+        t_per_pt = T_per_pt[..., :3, 3]                        # (N, 3)
+        t_root_per_pt = trans_cur[ins_id]                      # (N, 3)
+
+        world_means = torch.bmm(R_per_pt, means.unsqueeze(-1)).squeeze(-1) + t_per_pt + t_root_per_pt
+
+        R_quats = matrix_to_quaternion(R_per_pt)
+        world_quats = quat_mult(self.quat_act(R_quats), self.quat_act(quats))
+
+        # Mask out invisible instances.
+        valid_per_pt = instance_mask[ins_id].unsqueeze(-1)
+        world_means = world_means * valid_per_pt
+        identity_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=world_quats.device).expand_as(world_quats)
+        world_quats = torch.where(valid_per_pt.expand(-1, 4), world_quats, identity_q)
+
+        return world_means, world_quats
+
+    def transform_means(self, means: torch.Tensor) -> torch.Tensor:
+        # Delegate; supply a dummy identity-quat batch and discard the returned quats.
+        dummy_q = torch.zeros(means.shape[0], 4, device=means.device)
+        dummy_q[..., 0] = 1.0
+        world_means, _ = self.transform_means_and_quats(means, dummy_q)
+        return world_means
+
+    def get_param_groups(self) -> Dict[str, List[Parameter]]:
+        param_groups = self.get_gaussian_param_groups()
+        param_groups[self.class_prefix + "ins_rotation"]    = [self.instances_quats]
+        param_groups[self.class_prefix + "ins_translation"] = [self.instances_trans]
+        param_groups[self.class_prefix + "smpl_rotation"]   = [self.smpl_qauts]
+        if self.refine_pose:
+            param_groups[self.class_prefix + "seg_quat_residuals"]  = [self.seg_quat_residuals]
+            param_groups[self.class_prefix + "seg_trans_residuals"] = [self.seg_trans_residuals]
+        return param_groups
+
+    def state_dict(self) -> Dict:
+        state_dict = super().state_dict()
+        state_dict.update({
+            "point_segment_ids":   self.point_segment_ids,
+            "seg_quat_residuals":  self.seg_quat_residuals.data,
+            "seg_trans_residuals": self.seg_trans_residuals.data,
+        })
+        return state_dict
+
+    def load_state_dict(self, state_dict: Dict, **kwargs) -> str:
+        self.point_segment_ids = state_dict.pop("point_segment_ids")
+        seg_q = state_dict.pop("seg_quat_residuals")
+        seg_t = state_dict.pop("seg_trans_residuals")
+        self.seg_quat_residuals  = Parameter(seg_q, requires_grad=self.refine_pose)
+        self.seg_trans_residuals = Parameter(seg_t, requires_grad=self.refine_pose)
+        msg = super().load_state_dict(state_dict, **kwargs)
+        return msg
