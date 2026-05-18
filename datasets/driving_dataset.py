@@ -28,7 +28,8 @@ if DEBUG_PCD:
 NAME_TO_NODE = {
     "RigidNodes": ModelType.RigidNodes,
     "SMPLNodes": ModelType.SMPLNodes,
-    "DeformableNodes": ModelType.DeformableNodes
+    "DeformableNodes": ModelType.DeformableNodes,
+    "PartRigidNodes": ModelType.PartRigidNodes,
 }
 
 class DrivingDataset(SceneDataset):
@@ -296,8 +297,9 @@ class DrivingDataset(SceneDataset):
                 
                 if cur_node_type == "DeformableNodes":
                     if not (
-                        o_type == ModelType.DeformableNodes or 
-                        o_type == ModelType.SMPLNodes
+                        o_type == ModelType.DeformableNodes or
+                        o_type == ModelType.SMPLNodes or
+                        o_type == ModelType.PartRigidNodes
                     ):
                         continue
                 elif cur_node_type == "RigidNodes":
@@ -395,7 +397,12 @@ class DrivingDataset(SceneDataset):
                 )
         return instance_dict
     
-    def get_init_smpl_objects(self, only_moving: bool = False, traj_length_thres: float = 0.5):
+    def get_init_smpl_objects(
+        self,
+        only_moving: bool = False,
+        traj_length_thres: float = 0.5,
+        node_type_name: str = "SMPLNodes",
+    ):
         instance_dict = {}
         """
         instance_dict = {
@@ -460,7 +467,7 @@ class DrivingDataset(SceneDataset):
                     collected_lidar_colors.append(valid_colors)
                 
                 instance_dict[ins_id] = {
-                    "node_type": "SMPLNodes",
+                    "node_type": node_type_name,
                     "smpl_quats": smpl_quats,           # [frame_num, 24, 4]
                     "smpl_trans": smpl_trans,           # [frame_num, 3]
                     "smpl_betas": first_frame_betas,    # [10]

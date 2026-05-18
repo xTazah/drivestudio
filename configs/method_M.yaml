@@ -99,10 +99,8 @@ model:
   PartRigidNodes:
     type: models.nodes.PartRigidNodes
     init:
-      instance_max_pts: 5000
       only_moving: false
-      traj_length_thres: 0.0
-      opacity_init_value: 0.99
+      traj_length_thres: 0.5
     ctrl:
       refine_pose: true
       use_voxel_deformer: false

@@ -17,6 +17,7 @@ class ModelType(IntEnum):
     RigidNodes = 0
     SMPLNodes = 1
     DeformableNodes = 2
+    PartRigidNodes = 3
     
 class SceneDataset(abc.ABC):
     """

@@ -97,16 +97,27 @@ class MultiTrainer(BasicTrainer):
 
         if "DeformableNodes" in self.model_config:
             deformnode_pts_dict = dataset.get_init_objects(
-                cur_node_type='DeformableNodes',        
-                exclude_smpl="SMPLNodes" in self.model_config,
+                cur_node_type='DeformableNodes',
+                exclude_smpl=(
+                    "SMPLNodes" in self.model_config
+                    or "PartRigidNodes" in self.model_config
+                ),
                 **self.model_config["DeformableNodes"]["init"]
             )
 
         if "SMPLNodes" in self.model_config:
             smplnode_pts_dict = dataset.get_init_smpl_objects(
+                node_type_name="SMPLNodes",
                 **self.model_config["SMPLNodes"]["init"]
             )
-        allnode_pts_dict = {**rigidnode_pts_dict, **deformnode_pts_dict, **smplnode_pts_dict}
+
+        partrigidnode_pts_dict = {}
+        if "PartRigidNodes" in self.model_config:
+            partrigidnode_pts_dict = dataset.get_init_smpl_objects(
+                node_type_name="PartRigidNodes",
+                **self.model_config["PartRigidNodes"]["init"]
+            )
+        allnode_pts_dict = {**rigidnode_pts_dict, **deformnode_pts_dict, **smplnode_pts_dict, **partrigidnode_pts_dict}
         
         # NOTE: Some gaussian classes may be empty (because no points for initialization)
         #       We will delete these classes from the model_config and models
@@ -175,6 +186,12 @@ class MultiTrainer(BasicTrainer):
                 empty = self.safe_init_models(
                     model=model,
                     instance_pts_dict=smplnode_pts_dict
+                )
+
+            if class_name == 'PartRigidNodes':
+                empty = self.safe_init_models(
+                    model=model,
+                    instance_pts_dict=partrigidnode_pts_dict
                 )
                 
             if empty:
