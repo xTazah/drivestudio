@@ -32,6 +32,8 @@ class MultiTrainer(BasicTrainer):
             self.gaussian_classes["SMPLNodes"] = GSModelType.SMPLNodes
         if "DeformableNodes" in self.model_config:
             self.gaussian_classes["DeformableNodes"] = GSModelType.DeformableNodes
+        if "PartRigidNodes" in self.model_config:
+            self.gaussian_classes["PartRigidNodes"] = GSModelType.PartRigidNodes
            
         for class_name, model_cfg in self.model_config.items():
             # update model config for gaussian classes

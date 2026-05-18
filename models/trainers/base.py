@@ -25,6 +25,7 @@ class GSModelType(IntEnum):
     RigidNodes = 1
     SMPLNodes = 2
     DeformableNodes = 3
+    PartRigidNodes = 4
 
 def lr_scheduler_fn(
     cfg: OmegaConf,
