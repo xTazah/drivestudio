@@ -8,6 +8,7 @@ forward kinematics on the SMPL 24-joint kintree, using the data SMPL pose
 systematic SMPL-estimation bias; M-noref freezes these residuals at identity.
 """
 import logging
+from typing import Dict, List
 
 import torch
 from torch.nn import Parameter
@@ -68,3 +69,57 @@ class PartRigidNodes(SMPLNodes):
     def refine_pose(self) -> bool:
         # Default True (full method M). Set to False in config for M-noref.
         return bool(self.ctrl_cfg.get("refine_pose", True))
+
+    def create_from_pcd(self, instance_pts_dict: Dict[str, torch.Tensor]) -> None:
+        """
+        Initialize segment topology, canonical-frame means, and residuals.
+
+        Calls SMPLNodes.create_from_pcd for: SMPLTemplate construction, per-vertex
+        initial means/scales/quats/opacities, parameter setup, instances_fv /
+        instances_quats / instances_trans / smpl_qauts.
+
+        On top of that we add:
+          - point_segment_ids: (N_total_gaussians,) long
+          - rewrite self._means.data so each vertex lives in its anchor joint's
+            canonical (T-pose) frame
+          - seg_quat_residuals, seg_trans_residuals parameters
+        """
+        super().create_from_pcd(instance_pts_dict)
+
+        # 1. Per-vertex segment ids via SMPL skinning-weight argmax -> JOINT_TO_SEGMENT.
+        # template.W shape: (num_instances, smpl_points_num, 24).
+        W = self.template.W
+        per_vertex_joint = W.argmax(dim=-1)                # (B, 6890)
+        joint_to_seg_dev = JOINT_TO_SEGMENT.to(W.device)
+        per_vertex_seg = joint_to_seg_dev[per_vertex_joint]  # (B, 6890)
+        # _means is laid out (B*6890, 3); point_segment_ids parallel to that.
+        self.point_segment_ids = per_vertex_seg.reshape(-1).contiguous()  # (B*6890,)
+
+        # 2. Express each vertex in anchor-joint canonical frame.
+        # template.J_canonical: (B, 24, 3) joint positions in T-pose.
+        anchors_dev = SEGMENT_ANCHORS.to(W.device)
+        anchor_joint_per_vertex = anchors_dev[per_vertex_seg]    # (B, 6890)
+        J_can = self.template.J_canonical                        # (B, 24, 3)
+        anchor_pos = torch.gather(
+            J_can,
+            dim=1,
+            index=anchor_joint_per_vertex.unsqueeze(-1).expand(-1, -1, 3),
+        )                                                        # (B, 6890, 3)
+        anchor_pos_flat = anchor_pos.reshape(-1, 3)              # (B*6890, 3)
+        with torch.no_grad():
+            self._means.data = self._means.data - anchor_pos_flat
+
+        # 3. Residual parameters: (B, 10, 4) quats init to identity, (B, 10, 3) trans init to zero.
+        B = self.num_instances
+        identity_q = torch.zeros(B, NUM_SEGMENTS, 4, device=self.device)
+        identity_q[..., 0] = 1.0  # [1, 0, 0, 0]
+        zero_t = torch.zeros(B, NUM_SEGMENTS, 3, device=self.device)
+        self.seg_quat_residuals = Parameter(identity_q, requires_grad=self.refine_pose)
+        self.seg_trans_residuals = Parameter(zero_t, requires_grad=self.refine_pose)
+
+        logger.info(
+            f"PartRigidNodes: {B} instances x {NUM_SEGMENTS} segments. "
+            f"refine_pose={self.refine_pose}. "
+            f"Per-segment vertex counts (instance 0): "
+            f"{[int((per_vertex_seg[0] == s).sum()) for s in range(NUM_SEGMENTS)]}"
+        )
