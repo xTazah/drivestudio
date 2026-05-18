@@ -249,26 +249,44 @@ loader routes `Vehicle → RigidNodes`, `Pedestrian → SMPLNodes`,
 SMPL or Deformable nodes), so pedestrians and cyclists are silently dropped
 during scene-graph initialization. If you want a true "Street Gaussians
 baseline" where *all* dynamic objects are treated as rigid (B0 in the
-thesis ablation table), override the routing:
+thesis ablation table), use the `waymo/1cams_B0` dataset variant:
 
 ```bash
 python tools/train.py \
     --config_file configs/streetgs.yaml \
     ... (other args as above) ... \
-    +data.pixel_source.object_class_node_mapping.Pedestrian=RigidNodes \
-    +data.pixel_source.object_class_node_mapping.Cyclist=RigidNodes
+    dataset=waymo/1cams_B0
 ```
 
-The `+` prefix tells OmegaConf to add a new key (the dict doesn't exist in
-the default config). After training, look for the log line near the start:
+`1cams_B0.yaml` is identical to `1cams.yaml` except it sets
+`data.pixel_source.object_class_node_mapping` to route all dynamic classes
+(Vehicle, Pedestrian, Cyclist) to RigidNodes.
+
+After training, look for the log line near the start:
 
 ```
 INFO root - Object class -> node-type mapping: {'Vehicle': 'RigidNodes', 'Pedestrian': 'RigidNodes', 'Cyclist': 'RigidNodes'}
 ```
 
-That confirms the override took effect. Without this override, your eval
-videos will show no pedestrians and no cyclists in the dynamic layer
-(they're missing, not ghosted).
+That confirms the override took effect. Without it (e.g. running the
+default `dataset=waymo/1cams`), your eval videos will show no pedestrians
+and no cyclists in the dynamic layer — they're missing, not ghosted.
+
+**Why a config variant instead of a CLI flag:** OmegaConf's
+`from_cli` parser (used by `tools/train.py`) handles nested-key creation
+inconsistently. Both `+key.subkey=val` and `++key.subkey=val` either error
+or land the key in the wrong place. Using a YAML config variant sidesteps
+the issue entirely. If you need ad-hoc per-run mappings beyond what
+`1cams_B0.yaml` provides, copy that file and edit it.
+
+For slow-walker peds, you may also want to relax the trajectory filter
+(default `traj_length_thres: 1.0` excludes peds walking under 1 m within
+the training window):
+
+```bash
+... dataset=waymo/1cams_B0 \
+    model.RigidNodes.init.only_moving=False
+```
 
 On RTX 2070 SUPER: expect ~3–5 hours wall-time for 30k iters at 1 camera.
 The ETA printed early in training underestimates — it doesn't account for
