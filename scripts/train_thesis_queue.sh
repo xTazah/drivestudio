@@ -147,6 +147,8 @@ run_one() {
         "trainer.losses.depth.w=0.05"
         "model.Background.ctrl.cull_alpha_thresh=0.01"
         "model.Background.ctrl.cull_scale_thresh=0.3"
+        # skip novel-view rendering at end of training (slow, not needed for thesis metrics)
+        "render.render_novel.traj_types=[]"
     )
 
     # --- method-specific overrides ---
