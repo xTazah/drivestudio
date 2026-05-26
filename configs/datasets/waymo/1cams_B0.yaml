@@ -26,7 +26,7 @@ data:
     load_sky_mask: True
     load_dynamic_mask: True
     load_objects: True
-    load_smpl: True
+    load_smpl: False  # B0 routes all classes to RigidNodes; no SMPL data needed
     object_class_node_mapping:
       Vehicle: RigidNodes
       Pedestrian: RigidNodes
