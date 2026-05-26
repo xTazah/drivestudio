@@ -36,18 +36,10 @@ export LD_LIBRARY_PATH="/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}"
 # Order: scene 23 1cam, scene 114 1cam, scene 23 3cam, scene 114 3cam.
 # Within each (scene, cam) block we train B0 -> M-noref -> M.
 QUEUE=(
-    "23|1|B0"
-    "23|1|Mnoref"
-    "23|1|M"
-    "114|1|B0"
-    "114|1|Mnoref"
-    "114|1|M"
-    "23|3|B0"
-    "23|3|Mnoref"
-    "23|3|M"
-    "114|3|B0"
-    "114|3|Mnoref"
-    "114|3|M"
+    "327|1|B0"
+    "327|3|B0"
+    "552|1|B0"
+    "552|3|B0"
 )
 
 # Allow `DISABLE_3CAM=1 bash scripts/...` to skip the 3-cam half.

@@ -139,12 +139,58 @@ This step uses the **separate** `segformer` conda env. Don't try to install
 SegFormer into the `drivestudio` env — they have incompatible torch/mmcv
 versions.
 
+### 3a. One-time: create and populate the `segformer` env
+
+```bash
+# 1. Clone SegFormer
+git clone https://github.com/NVlabs/SegFormer ~/SegFormer
+#   (on WSL: /mnt/d/Git/SegFormer — adjust segformer_path in 3b accordingly)
+
+# 2. Create env
+conda create -n segformer python=3.8 -y
+conda activate segformer
+
+# 3. PyTorch 1.8.1 + cu111
+pip install torch==1.8.1+cu111 torchvision==0.9.1+cu111 torchaudio==0.8.1 \
+    -f https://download.pytorch.org/whl/torch_stable.html
+
+# 4. Other deps
+pip install timm==0.3.2 pylint debugpy opencv-python-headless \
+    attrs ipython tqdm imageio scikit-image omegaconf gdown
+
+# 5. mmcv-full prebuilt wheel — NOT 1.2.7 from source (that fails; see gotchas)
+pip install mmcv-full==1.3.18 \
+    -f https://download.openmmlab.com/mmcv/dist/cu111/torch1.8.0/index.html
+
+# 6. Install SegFormer
+cd ~/SegFormer && pip install .
+
+# 7. Patch the mmcv version cap — MUST target the site-packages copy, not
+#    the source clone (pip install . copies mmseg there; patching the clone
+#    has no effect on what Python imports)
+sed -i "s/MMCV_MAX = '1.3.0'/MMCV_MAX = '1.4.0'/" \
+    "$CONDA_PREFIX/lib/python3.8/site-packages/mmseg/__init__.py"
+
+# 8. Download checkpoint (~970 MB)
+mkdir -p ~/SegFormer/pretrained && cd ~/SegFormer/pretrained
+gdown 1e7DECAH0TRtPZM6hTqRGoboq1XPqSmuj
+# The file lands as segformer.b5.1024x1024.city.160k.pth
+```
+
+Verify the setup:
+```bash
+python -c "from mmseg.apis import inference_segmentor, init_segmentor; print('OK')"
+# Expected: OK
+```
+
+### 3b. Run sky mask extraction
+
 ```bash
 conda activate segformer
 export LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH
-cd ~/drivestudio  # back to drivestudio repo (extract_masks.py lives here)
+cd ~/drivestudio  # back to drivestudio repo
 
-segformer_path=/mnt/d/Git/SegFormer  # adjust to your SegFormer clone location
+segformer_path=~/SegFormer  # adjust if clone is elsewhere
 
 python datasets/tools/extract_masks.py \
     --data_root data/waymo/processed/training \
