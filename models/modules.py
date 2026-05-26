@@ -7,7 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from pytorch3d.ops import knn_points
-import nvdiffrast.torch as dr
+try:
+    import nvdiffrast.torch as dr
+except ImportError:
+    dr = None  # only needed for cubemap env-map; not required for B0/rigid methods
 from utils.geometry import rotation_6d_to_matrix
 
 logger = logging.getLogger()
