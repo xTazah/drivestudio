@@ -36,10 +36,8 @@ export LD_LIBRARY_PATH="/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}"
 # Order: scene 23 1cam, scene 114 1cam, scene 23 3cam, scene 114 3cam.
 # Within each (scene, cam) block we train B0 -> M-noref -> M.
 QUEUE=(
-    "327|1|Mnoref"
-    "327|1|M"
-    "552|1|Mnoref"
-    "552|1|M"
+    "327|1|OmniRe"
+    "552|1|OmniRe"
 )
 
 # Allow `DISABLE_3CAM=1 bash scripts/...` to skip the 3-cam half.
@@ -82,21 +80,23 @@ run_one() {
     local total="$5"
 
     # Resolve the dataset variant.
-    # 1cam variants: 1cams_B0.yaml (B0), 1cams_M.yaml (M and M-noref).
+    # 1cam variants: 1cams_B0.yaml (B0), 1cams_M.yaml (M and M-noref), 1cams.yaml (OmniRe).
     # 3cam variants: 3cams_B0.yaml (B0), 3cams_M.yaml (M and M-noref).
     local dataset_variant
     case "$method" in
         B0)            dataset_variant="waymo/${cams}cams_B0" ;;
         M|Mnoref)      dataset_variant="waymo/${cams}cams_M"  ;;
+        OmniRe)        dataset_variant="waymo/${cams}cams"    ;;
         *)             echo "BUG: unknown method $method"; return 99 ;;
     esac
 
     # Resolve the trainer/model config.
-    # B0 uses streetgs.yaml (only RigidNodes block). M / Mnoref use method_M.yaml.
+    # B0 uses streetgs.yaml (only RigidNodes block). M / Mnoref use method_M.yaml. OmniRe uses omnire.yaml.
     local config_file
     case "$method" in
         B0)            config_file="configs/streetgs.yaml" ;;
         M|Mnoref)      config_file="configs/method_M.yaml" ;;
+        OmniRe)        config_file="configs/omnire.yaml"   ;;
     esac
 
     # Run name & output paths.
