@@ -196,8 +196,10 @@ def _palette_color(i: int):
     return np.asarray(PALETTE[i % len(PALETTE)], dtype=np.float32)
 
 
-def _blended_colors(rgb: np.ndarray, palette_color: np.ndarray, alpha_palette: float = 0.6):
-    """Per-Gaussian color = alpha * palette + (1-alpha) * learned RGB."""
+def _blended_colors(rgb: np.ndarray, palette_color: np.ndarray, alpha_palette: float = 0.2):
+    """Per-Gaussian color = alpha * palette + (1-alpha) * learned RGB.
+    Default leans heavily on the learned RGB so objects keep their real appearance,
+    with only a subtle palette tint to keep instances distinguishable."""
     pc = palette_color[None, :]
     blended = alpha_palette * pc + (1.0 - alpha_palette) * rgb
     return np.clip(blended, 0.0, 1.0)
@@ -259,7 +261,7 @@ def plot_local_panel(fig, gs_left, objects, elev, azim):
 def plot_world_panel(ax, bg, objects, elev, azim,
                      draw_arrows=True, draw_bg=True, draw_objs=True,
                      arrow_origin="centroid", show_labels=True,
-                     roi_center=None, roi_radius=None):
+                     roi_center=None, roi_radius=None, roi_z_scale=0.3):
     """If roi_center+roi_radius are given, frame the panel on that ROI rather
     than fitting all data extents (useful when the scene trajectory is huge
     but only a small region is interesting)."""
@@ -278,9 +280,10 @@ def plot_world_panel(ax, bg, objects, elev, azim,
     if roi_center is not None and roi_radius is not None:
         c = np.asarray(roi_center, dtype=np.float64)
         r = float(roi_radius)
-        lims = [(c[i] - r, c[i] + r) for i in range(3)]
-        # squash z range a bit so the figure isn't a tall column
-        lims[2] = (c[2] - r * 0.4, c[2] + r * 0.4)
+        rz = float(roi_radius) * float(roi_z_scale)
+        lims = [(c[0] - r, c[0] + r),
+                (c[1] - r, c[1] + r),
+                (c[2] - rz, c[2] + rz)]
         scene_centroid = c
     else:
         lims = _compute_lims(cat, pad_frac=0.03)
@@ -327,22 +330,37 @@ def plot_world_panel(ax, bg, objects, elev, azim,
 
 
 def make_combined_figure(bg, objects, out_path: str, elev: float, azim: float, dpi: int,
-                         roi_center=None, roi_radius=None,
+                         roi_center=None, roi_radius=None, roi_z_scale=0.3,
                          show_labels=True, draw_arrows=True):
+    """Two-panel figure: object-local frames on the left, world composition on the right."""
     fig = plt.figure(figsize=(16, 8))
     gs = gridspec.GridSpec(1, 2, width_ratios=[1.0, 1.2], wspace=0.05)
     plot_local_panel(fig, gs[0, 0], objects, elev=elev, azim=azim)
     ax_world = fig.add_subplot(gs[0, 1], projection="3d")
     plot_world_panel(ax_world, bg, objects, elev=elev, azim=azim,
-                     roi_center=roi_center, roi_radius=roi_radius,
+                     roi_center=roi_center, roi_radius=roi_radius, roi_z_scale=roi_z_scale,
                      show_labels=show_labels, draw_arrows=draw_arrows)
     fig.suptitle("Scene decomposition: object-local frames (left) → world space (right)", fontsize=12)
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
+def make_world_only_figure(bg, objects, out_path: str, elev: float, azim: float, dpi: int,
+                           roi_center=None, roi_radius=None, roi_z_scale=0.3,
+                           show_labels=True, draw_arrows=True, transparent=False):
+    """Single-panel: full composed world (background + objects + pose arrows)."""
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection="3d")
+    plot_world_panel(ax, bg, objects, elev=elev, azim=azim,
+                     roi_center=roi_center, roi_radius=roi_radius, roi_z_scale=roi_z_scale,
+                     show_labels=show_labels, draw_arrows=draw_arrows)
+    ax.set_title("")
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", transparent=transparent)
+    plt.close(fig)
+
+
 def make_separate_panels(bg, objects, out_dir: str, elev: float, azim: float, dpi: int,
-                         roi_center=None, roi_radius=None,
+                         roi_center=None, roi_radius=None, roi_z_scale=0.3,
                          show_labels=True, draw_arrows=True):
     os.makedirs(out_dir, exist_ok=True)
 
@@ -350,14 +368,14 @@ def make_separate_panels(bg, objects, out_dir: str, elev: float, azim: float, dp
     ax = fig.add_subplot(111, projection="3d")
     plot_world_panel(ax, bg, objects, elev=elev, azim=azim,
                      draw_objs=False, draw_arrows=False,
-                     roi_center=roi_center, roi_radius=roi_radius)
+                     roi_center=roi_center, roi_radius=roi_radius, roi_z_scale=roi_z_scale)
     fig.savefig(os.path.join(out_dir, "background_only.png"), dpi=dpi, transparent=True, bbox_inches="tight")
     plt.close(fig)
 
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
     plot_world_panel(ax, bg, objects, elev=elev, azim=azim, draw_bg=False,
-                     roi_center=roi_center, roi_radius=roi_radius,
+                     roi_center=roi_center, roi_radius=roi_radius, roi_z_scale=roi_z_scale,
                      show_labels=show_labels, draw_arrows=draw_arrows)
     fig.savefig(os.path.join(out_dir, "objects_world.png"), dpi=dpi, transparent=True, bbox_inches="tight")
     plt.close(fig)
@@ -406,9 +424,11 @@ def main():
     parser.add_argument("--strict-load", action="store_true",
                         help="Use strict=True when loading the checkpoint (default: non-strict)")
     # Region-of-interest cropping
-    parser.add_argument("--roi-radius", type=float, default=25.0,
+    parser.add_argument("--roi-radius", type=float, default=15.0,
                         help="Half-extent in meters around the ROI center used to crop the "
                              "world panel and pick which objects to show. Set <=0 to disable.")
+    parser.add_argument("--roi-z-scale", type=float, default=0.3,
+                        help="Vertical extent multiplier relative to roi-radius (smaller = less empty sky).")
     parser.add_argument("--roi-center", type=float, nargs=3, default=None,
                         help="World-space (x y z) of ROI center. Defaults to the camera "
                              "position at the chosen frame.")
@@ -479,14 +499,25 @@ def main():
     make_combined_figure(bg, objects, args.output,
                          elev=args.elev, azim=args.azim, dpi=args.dpi,
                          roi_center=roi_center, roi_radius=roi_radius,
+                         roi_z_scale=args.roi_z_scale,
                          show_labels=not args.no_labels, draw_arrows=not args.no_arrows)
     print(f"      wrote {args.output}")
+
+    # Single combined world-only render (background + objects + arrows in one panel).
+    world_path = os.path.splitext(args.output)[0] + "_world.png"
+    make_world_only_figure(bg, objects, world_path,
+                           elev=args.elev, azim=args.azim, dpi=args.dpi,
+                           roi_center=roi_center, roi_radius=roi_radius,
+                           roi_z_scale=args.roi_z_scale,
+                           show_labels=not args.no_labels, draw_arrows=not args.no_arrows)
+    print(f"      wrote {world_path}")
 
     if args.separate_panels:
         sep_dir = os.path.splitext(args.output)[0] + "_panels"
         make_separate_panels(bg, objects, sep_dir,
                              elev=args.elev, azim=args.azim, dpi=args.dpi,
                              roi_center=roi_center, roi_radius=roi_radius,
+                             roi_z_scale=args.roi_z_scale,
                              show_labels=not args.no_labels, draw_arrows=not args.no_arrows)
         print(f"      wrote separate panels to {sep_dir}/")
 
