@@ -55,7 +55,7 @@ fi
 
 # --- output paths ---------------------------------------------------------
 RUN_BATCH_TS="$(date +%Y%m%d_%H%M%S)"
-BATCH_OUT="logs/thesis_batch_${RUN_BATCH_TS}"
+BATCH_OUT="${HOME}/logs/thesis_batch_${RUN_BATCH_TS}"
 mkdir -p "$BATCH_OUT"
 SUMMARY_CSV="$BATCH_OUT/summary.csv"
 echo "run_idx,scene,cams,method,status,wall_seconds,full_psnr,human_psnr,vehicle_psnr,log_path" > "$SUMMARY_CSV"
@@ -103,7 +103,7 @@ run_one() {
     local pad_idx="$(printf '%02d' "$idx")"
     local run_name="scene${scene}_${cams}cam_${method}_full"
     local project_name="thesis_${cams}cam_${method}"
-    local output_root="logs/thesis_runs"
+    local output_root="${HOME}/logs/thesis_runs"
     local run_dir="$output_root/$project_name/$run_name"
     local run_log="$BATCH_OUT/${pad_idx}_${run_name}.log"
     local ckpt_final="$run_dir/checkpoint_final.pth"
