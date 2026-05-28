@@ -96,6 +96,15 @@ def extract_background(trainer, alpha_thresh: float, max_points: int):
     return _subsample(xyz, rgb, max_points, seed=0)
 
 
+def get_camera_position(dataset, frame: int, cam_id: int = 0) -> np.ndarray:
+    """Return the world-space (x,y,z) of camera `cam_id` at `frame`."""
+    cam = dataset.pixel_source.camera_data[cam_id]
+    c2w = cam.cam_to_worlds[frame]
+    if hasattr(c2w, "detach"):
+        c2w = c2w.detach().cpu().numpy()
+    return np.asarray(c2w[:3, 3], dtype=np.float64)
+
+
 def extract_objects(trainer, frame: int, alpha_thresh: float, max_points: int):
     """
     For each instance in each dynamic node class, return
@@ -249,7 +258,11 @@ def plot_local_panel(fig, gs_left, objects, elev, azim):
 
 def plot_world_panel(ax, bg, objects, elev, azim,
                      draw_arrows=True, draw_bg=True, draw_objs=True,
-                     arrow_origin="centroid", show_labels=True):
+                     arrow_origin="centroid", show_labels=True,
+                     roi_center=None, roi_radius=None):
+    """If roi_center+roi_radius are given, frame the panel on that ROI rather
+    than fitting all data extents (useful when the scene trajectory is huge
+    but only a small region is interesting)."""
     all_pts = []
     if draw_bg and bg is not None:
         all_pts.append(bg[0])
@@ -262,8 +275,16 @@ def plot_world_panel(ax, bg, objects, elev, azim,
         return
 
     cat = np.concatenate(all_pts, axis=0)
-    lims = _compute_lims(cat, pad_frac=0.03)
-    scene_centroid = cat.mean(axis=0)
+    if roi_center is not None and roi_radius is not None:
+        c = np.asarray(roi_center, dtype=np.float64)
+        r = float(roi_radius)
+        lims = [(c[i] - r, c[i] + r) for i in range(3)]
+        # squash z range a bit so the figure isn't a tall column
+        lims[2] = (c[2] - r * 0.4, c[2] + r * 0.4)
+        scene_centroid = c
+    else:
+        lims = _compute_lims(cat, pad_frac=0.03)
+        scene_centroid = cat.mean(axis=0)
 
     if draw_bg and bg is not None:
         bg_xyz, bg_rgb = bg
@@ -305,35 +326,42 @@ def plot_world_panel(ax, bg, objects, elev, azim,
     ax.view_init(elev=elev, azim=azim)
 
 
-def make_combined_figure(bg, objects, out_path: str, elev: float, azim: float, dpi: int):
+def make_combined_figure(bg, objects, out_path: str, elev: float, azim: float, dpi: int,
+                         roi_center=None, roi_radius=None,
+                         show_labels=True, draw_arrows=True):
     fig = plt.figure(figsize=(16, 8))
     gs = gridspec.GridSpec(1, 2, width_ratios=[1.0, 1.2], wspace=0.05)
     plot_local_panel(fig, gs[0, 0], objects, elev=elev, azim=azim)
     ax_world = fig.add_subplot(gs[0, 1], projection="3d")
-    plot_world_panel(ax_world, bg, objects, elev=elev, azim=azim)
+    plot_world_panel(ax_world, bg, objects, elev=elev, azim=azim,
+                     roi_center=roi_center, roi_radius=roi_radius,
+                     show_labels=show_labels, draw_arrows=draw_arrows)
     fig.suptitle("Scene decomposition: object-local frames (left) → world space (right)", fontsize=12)
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
-def make_separate_panels(bg, objects, out_dir: str, elev: float, azim: float, dpi: int):
+def make_separate_panels(bg, objects, out_dir: str, elev: float, azim: float, dpi: int,
+                         roi_center=None, roi_radius=None,
+                         show_labels=True, draw_arrows=True):
     os.makedirs(out_dir, exist_ok=True)
 
-    # background only
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
-    plot_world_panel(ax, bg, objects, elev=elev, azim=azim, draw_objs=False, draw_arrows=False)
+    plot_world_panel(ax, bg, objects, elev=elev, azim=azim,
+                     draw_objs=False, draw_arrows=False,
+                     roi_center=roi_center, roi_radius=roi_radius)
     fig.savefig(os.path.join(out_dir, "background_only.png"), dpi=dpi, transparent=True, bbox_inches="tight")
     plt.close(fig)
 
-    # objects in world
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
-    plot_world_panel(ax, bg, objects, elev=elev, azim=azim, draw_bg=False)
+    plot_world_panel(ax, bg, objects, elev=elev, azim=azim, draw_bg=False,
+                     roi_center=roi_center, roi_radius=roi_radius,
+                     show_labels=show_labels, draw_arrows=draw_arrows)
     fig.savefig(os.path.join(out_dir, "objects_world.png"), dpi=dpi, transparent=True, bbox_inches="tight")
     plt.close(fig)
 
-    # objects local (grid)
     fig = plt.figure(figsize=(8, 8))
     gs = gridspec.GridSpec(1, 1)
     plot_local_panel(fig, gs[0, 0], objects, elev=elev, azim=azim)
@@ -377,6 +405,19 @@ def main():
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument("--strict-load", action="store_true",
                         help="Use strict=True when loading the checkpoint (default: non-strict)")
+    # Region-of-interest cropping
+    parser.add_argument("--roi-radius", type=float, default=25.0,
+                        help="Half-extent in meters around the ROI center used to crop the "
+                             "world panel and pick which objects to show. Set <=0 to disable.")
+    parser.add_argument("--roi-center", type=float, nargs=3, default=None,
+                        help="World-space (x y z) of ROI center. Defaults to the camera "
+                             "position at the chosen frame.")
+    parser.add_argument("--roi-cam-id", type=int, default=0,
+                        help="Which camera's position to use as ROI center when --roi-center is not given.")
+    parser.add_argument("--max-objects", type=int, default=8,
+                        help="Cap on number of objects to draw in the world panel (closest to ROI center first).")
+    parser.add_argument("--no-labels", action="store_true", help="Hide #id labels on objects.")
+    parser.add_argument("--no-arrows", action="store_true", help="Hide pose arrows in the world panel.")
     args = parser.parse_args()
 
     print(f"[1/4] Loading checkpoint: {args.checkpoint}")
@@ -395,18 +436,58 @@ def main():
     print("[3/4] Extracting object Gaussians + poses...")
     objects = extract_objects(trainer, frame=frame, alpha_thresh=args.alpha_thresh,
                               max_points=args.max_points_obj)
-    print(f"      objects: {len(objects)}")
+    print(f"      objects (raw): {len(objects)}")
+
+    # Determine ROI center
+    roi_center = None
+    roi_radius = args.roi_radius if args.roi_radius > 0 else None
+    if roi_radius is not None:
+        if args.roi_center is not None:
+            roi_center = np.asarray(args.roi_center, dtype=np.float64)
+        else:
+            try:
+                roi_center = get_camera_position(dataset, frame, args.roi_cam_id)
+            except Exception as e:
+                print(f"      WARN: could not get camera pose ({e}); ROI disabled")
+                roi_radius = None
+    if roi_center is not None:
+        print(f"      ROI center = {roi_center}, radius = {roi_radius}")
+
+    # Filter background and objects to ROI, cap object count by proximity
+    if roi_center is not None and roi_radius is not None:
+        if bg is not None:
+            bg_xyz, bg_rgb = bg
+            d = np.linalg.norm(bg_xyz - roi_center[None, :], axis=1)
+            keep = d < roi_radius
+            bg = (bg_xyz[keep], bg_rgb[keep])
+            print(f"      background after ROI crop: {bg[0].shape[0]:,} pts")
+        # rank objects by distance to ROI center, keep nearest --max-objects
+        objects.sort(key=lambda o: np.linalg.norm(o["world_xyz"].mean(axis=0) - roi_center))
+        objects = [o for o in objects
+                   if np.linalg.norm(o["world_xyz"].mean(axis=0) - roi_center) < roi_radius]
+        if args.max_objects > 0:
+            objects = objects[: args.max_objects]
+    elif args.max_objects > 0:
+        objects = objects[: args.max_objects]
+
+    print(f"      objects (drawn): {len(objects)}")
     for o in objects:
         print(f"        - {o['class']} #{o['instance_id']}: "
               f"{o['local_xyz'].shape[0]:,} pts, frame={o['frame']}")
 
     print("[4/4] Rendering figure...")
-    make_combined_figure(bg, objects, args.output, elev=args.elev, azim=args.azim, dpi=args.dpi)
+    make_combined_figure(bg, objects, args.output,
+                         elev=args.elev, azim=args.azim, dpi=args.dpi,
+                         roi_center=roi_center, roi_radius=roi_radius,
+                         show_labels=not args.no_labels, draw_arrows=not args.no_arrows)
     print(f"      wrote {args.output}")
 
     if args.separate_panels:
         sep_dir = os.path.splitext(args.output)[0] + "_panels"
-        make_separate_panels(bg, objects, sep_dir, elev=args.elev, azim=args.azim, dpi=args.dpi)
+        make_separate_panels(bg, objects, sep_dir,
+                             elev=args.elev, azim=args.azim, dpi=args.dpi,
+                             roi_center=roi_center, roi_radius=roi_radius,
+                             show_labels=not args.no_labels, draw_arrows=not args.no_arrows)
         print(f"      wrote separate panels to {sep_dir}/")
 
     if args.save_npz:
