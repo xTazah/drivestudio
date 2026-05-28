@@ -36,10 +36,10 @@ export LD_LIBRARY_PATH="/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}"
 # Order: scene 23 1cam, scene 114 1cam, scene 23 3cam, scene 114 3cam.
 # Within each (scene, cam) block we train B0 -> M-noref -> M.
 QUEUE=(
-    "327|1|B0"
-    "327|3|B0"
-    "552|1|B0"
-    "552|3|B0"
+    "327|1|Mnoref"
+    "327|1|M"
+    "552|1|Mnoref"
+    "552|1|M"
 )
 
 # Allow `DISABLE_3CAM=1 bash scripts/...` to skip the 3-cam half.
@@ -141,6 +141,8 @@ run_one() {
         "model.Background.ctrl.cull_scale_thresh=0.3"
         # skip novel-view rendering at end of training (slow, not needed for thesis metrics)
         "render.render_novel.traj_types=[]"
+        # skip full-set video rendering (OOM-kills server; test-split metrics already saved)
+        "render.render_full=False"
     )
 
     # --- method-specific overrides ---
