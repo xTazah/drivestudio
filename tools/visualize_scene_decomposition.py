@@ -38,7 +38,8 @@ from pytorch3d.transforms import quaternion_to_matrix  # noqa: E402
 
 # ---------- I/O helpers ----------
 
-def load_trainer(checkpoint_path: str, config_path: str = None, device: str = "cuda"):
+def load_trainer(checkpoint_path: str, config_path: str = None, device: str = "cuda",
+                 strict: bool = False):
     log_dir = os.path.dirname(checkpoint_path)
     if config_path is None:
         config_path = os.path.join(log_dir, "config.yaml")
@@ -60,7 +61,13 @@ def load_trainer(checkpoint_path: str, config_path: str = None, device: str = "c
         scene_aabb=dataset.get_aabb().reshape(2, 3),
         device=device_t,
     )
-    trainer.resume_from_checkpoint(ckpt_path=checkpoint_path, load_only_model=True)
+
+    # Load with strict=False so checkpoints that pre-date newer parameter
+    # registrations (e.g. PartRigidNodes.seg_*_residuals) still work for
+    # visualization-only use.
+    print(f"      loading state_dict (strict={strict})...")
+    state_dict = torch.load(checkpoint_path, map_location=device_t)
+    trainer.load_state_dict(state_dict, load_only_model=True, strict=strict)
     trainer.set_eval()
     return trainer, dataset, cfg
 
@@ -374,10 +381,13 @@ def main():
     parser.add_argument("--dpi", default=300, type=int)
     parser.add_argument("--save-npz", action="store_true")
     parser.add_argument("--device", default="cuda", type=str)
+    parser.add_argument("--strict-load", action="store_true",
+                        help="Use strict=True when loading the checkpoint (default: non-strict)")
     args = parser.parse_args()
 
     print(f"[1/4] Loading checkpoint: {args.checkpoint}")
-    trainer, dataset, cfg = load_trainer(args.checkpoint, args.config, device=args.device)
+    trainer, dataset, cfg = load_trainer(args.checkpoint, args.config,
+                                         device=args.device, strict=args.strict_load)
 
     num_frames = dataset.num_img_timesteps
     frame = args.frame if args.frame is not None else num_frames // 2
