@@ -25,7 +25,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
-from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -195,50 +194,35 @@ def _blended_colors(rgb: np.ndarray, palette_color: np.ndarray, alpha_palette: f
     return np.clip(blended, 0.0, 1.0)
 
 
-def _set_3d_axes(ax, title: str = "", equal: bool = True, lims=None):
+def _set_3d_axes(ax, title: str = "", lims=None):
+    """Strip all axis chrome: no ticks, no panes, no box outline, no grid.
+    Keeps equal-aspect framing based on the data bounds in `lims`."""
     ax.set_xlabel(""); ax.set_ylabel(""); ax.set_zlabel("")
     ax.set_xticks([]); ax.set_yticks([]); ax.set_zticks([])
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
         axis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.0))
         axis.pane.set_facecolor((1.0, 1.0, 1.0, 0.0))
+        axis.line.set_color((1.0, 1.0, 1.0, 0.0))
     ax.grid(False)
+    ax.set_axis_off()
     if title:
         ax.set_title(title, fontsize=10)
     if lims is not None:
         ax.set_xlim(lims[0]); ax.set_ylim(lims[1]); ax.set_zlim(lims[2])
-    if equal:
+        # equal aspect from real data extents
+        spans = [abs(lims[i][1] - lims[i][0]) for i in range(3)]
         try:
-            ax.set_box_aspect((1, 1, 1))
+            ax.set_box_aspect(spans)
         except Exception:
             pass
 
 
-def _draw_axis_triad(ax, length: float = 0.5, lw: float = 1.2):
-    ax.quiver(0, 0, 0, length, 0, 0, color="red",   linewidth=lw, arrow_length_ratio=0.2)
-    ax.quiver(0, 0, 0, 0, length, 0, color="green", linewidth=lw, arrow_length_ratio=0.2)
-    ax.quiver(0, 0, 0, 0, 0, length, color="blue",  linewidth=lw, arrow_length_ratio=0.2)
-
-
-def _draw_wire_bbox(ax, mins: np.ndarray, maxs: np.ndarray, color="0.4", lw=0.6):
-    c = [[mins[0], mins[1], mins[2]], [maxs[0], mins[1], mins[2]],
-         [maxs[0], maxs[1], mins[2]], [mins[0], maxs[1], mins[2]],
-         [mins[0], mins[1], maxs[2]], [maxs[0], mins[1], maxs[2]],
-         [maxs[0], maxs[1], maxs[2]], [mins[0], maxs[1], maxs[2]]]
-    edges = [(0,1),(1,2),(2,3),(3,0), (4,5),(5,6),(6,7),(7,4), (0,4),(1,5),(2,6),(3,7)]
-    segs = [[c[a], c[b]] for a, b in edges]
-    ax.add_collection3d(Line3DCollection(segs, colors=color, linewidths=lw))
-
-
-def _draw_ground(ax, lims, z=0.0, step=10.0, color=(0.85, 0.85, 0.85)):
-    (x0, x1), (y0, y1) = lims[0], lims[1]
-    xs = np.arange(np.floor(x0 / step) * step, x1 + step, step)
-    ys = np.arange(np.floor(y0 / step) * step, y1 + step, step)
-    segs = []
-    for x in xs:
-        segs.append([[x, y0, z], [x, y1, z]])
-    for y in ys:
-        segs.append([[x0, y, z], [x1, y, z]])
-    ax.add_collection3d(Line3DCollection(segs, colors=[color], linewidths=0.4, alpha=0.6))
+def _compute_lims(points: np.ndarray, pad_frac: float = 0.03):
+    """Tight bounds around the data so nothing floats in dead space."""
+    mins = points.min(axis=0)
+    maxs = points.max(axis=0)
+    pad = pad_frac * (maxs - mins + 1e-6)
+    return [(mins[i] - pad[i], maxs[i] + pad[i]) for i in range(3)]
 
 
 def plot_local_panel(fig, gs_left, objects, elev, azim):
@@ -256,58 +240,68 @@ def plot_local_panel(fig, gs_left, objects, elev, azim):
         xyz = obj["local_xyz"]
         rgb = obj["local_rgb"]
         col = _blended_colors(rgb, _palette_color(i))
-        ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], s=1.0, c=col, depthshade=False, linewidths=0)
-        mins, maxs = xyz.min(axis=0), xyz.max(axis=0)
-        pad = 0.1 * (maxs - mins + 1e-6)
-        lims = list(zip(mins - pad, maxs + pad))
-        ax_len = float(np.linalg.norm(maxs - mins)) * 0.25 + 1e-6
-        _draw_axis_triad(ax, length=max(ax_len, 0.3))
-        _draw_wire_bbox(ax, mins, maxs)
+        ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], s=1.0, c=col,
+                   depthshade=False, linewidths=0)
+        lims = _compute_lims(xyz, pad_frac=0.08)
         _set_3d_axes(ax, title=f"{obj['class']} #{obj['instance_id']}", lims=lims)
         ax.view_init(elev=elev, azim=azim)
 
 
-def plot_world_panel(ax, bg, objects, elev, azim, draw_arrows=True, draw_bg=True, draw_objs=True):
+def plot_world_panel(ax, bg, objects, elev, azim,
+                     draw_arrows=True, draw_bg=True, draw_objs=True,
+                     arrow_origin="centroid", show_labels=True):
     all_pts = []
-    if bg is not None:
-        bg_xyz, bg_rgb = bg
-        all_pts.append(bg_xyz)
-    for o in objects:
-        all_pts.append(o["world_xyz"])
+    if draw_bg and bg is not None:
+        all_pts.append(bg[0])
+    if draw_objs:
+        for o in objects:
+            all_pts.append(o["world_xyz"])
 
     if len(all_pts) == 0:
         ax.text2D(0.5, 0.5, "Empty scene", transform=ax.transAxes, ha="center")
         return
 
     cat = np.concatenate(all_pts, axis=0)
-    mins, maxs = cat.min(axis=0), cat.max(axis=0)
-    pad = 0.05 * (maxs - mins + 1e-6)
-    lims = list(zip(mins - pad, maxs + pad))
+    lims = _compute_lims(cat, pad_frac=0.03)
+    scene_centroid = cat.mean(axis=0)
 
     if draw_bg and bg is not None:
         bg_xyz, bg_rgb = bg
         ax.scatter(bg_xyz[:, 0], bg_xyz[:, 1], bg_xyz[:, 2],
-                   s=0.4, c=np.clip(bg_rgb, 0, 1), alpha=0.35, depthshade=False, linewidths=0)
+                   s=0.4, c=np.clip(bg_rgb, 0, 1), alpha=0.35,
+                   depthshade=False, linewidths=0)
 
     if draw_objs:
         for i, obj in enumerate(objects):
             xyz = obj["world_xyz"]
             col = _blended_colors(obj["local_rgb"], _palette_color(i))
-            ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], s=1.5, c=col, depthshade=False, linewidths=0)
+            ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], s=1.5, c=col,
+                       depthshade=False, linewidths=0)
 
         if draw_arrows:
+            # arrow origin: either the world origin (can be far away) or the
+            # scene centroid (visually cleaner for thesis figures).
+            if arrow_origin == "origin":
+                origin = np.zeros(3)
+            else:
+                origin = scene_centroid
+            # Stagger label z-offset slightly so they don't all collide.
+            z_span = lims[2][1] - lims[2][0]
             for i, obj in enumerate(objects):
                 center = obj["world_xyz"].mean(axis=0)
                 pc = _palette_color(i)
-                ax.plot([0, center[0]], [0, center[1]], [0, center[2]],
-                        color=pc, linewidth=1.2, alpha=0.8)
+                ax.plot([origin[0], center[0]],
+                        [origin[1], center[1]],
+                        [origin[2], center[2]],
+                        color=pc, linewidth=1.0, alpha=0.7)
                 ax.scatter([center[0]], [center[1]], [center[2]],
-                           s=20, c=[pc], edgecolors="black", linewidths=0.5)
-                ax.text(center[0], center[1], center[2] + 1.0,
-                        f"#{obj['instance_id']}", fontsize=8, color="black")
+                           s=18, c=[pc], edgecolors="black", linewidths=0.4)
+                if show_labels:
+                    z_off = 0.02 * z_span * (1 + (i % 3))
+                    ax.text(center[0], center[1], center[2] + z_off,
+                            f"#{obj['instance_id']}", fontsize=7, color="black")
 
-    _draw_ground(ax, lims, z=float(mins[2]))
-    _set_3d_axes(ax, title="World composition", lims=lims, equal=False)
+    _set_3d_axes(ax, title="World composition", lims=lims)
     ax.view_init(elev=elev, azim=azim)
 
 
