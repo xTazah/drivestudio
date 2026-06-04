@@ -169,7 +169,8 @@ def render_images(
     dataset: SplitWrapper,
     compute_metrics: bool = False,
     compute_error_map: bool = False,
-    vis_indices: Optional[List[int]] = None
+    vis_indices: Optional[List[int]] = None,
+    metrics_only: bool = False,
 ):
     """
     Render pixel-related outputs from a model.
@@ -185,7 +186,8 @@ def render_images(
         trainer=trainer,
         compute_metrics=compute_metrics,
         compute_error_map=compute_error_map,
-        vis_indices=vis_indices
+        vis_indices=vis_indices,
+        metrics_only=metrics_only,
     )
     if compute_metrics:
         num_samples = len(dataset) if vis_indices is None else len(vis_indices)
@@ -211,6 +213,7 @@ def render(
     compute_metrics: bool = False,
     compute_error_map: bool = False,
     vis_indices: Optional[List[int]] = None,
+    metrics_only: bool = False,
 ):
     """
     Renders a dataset utilizing a specified render function.
@@ -221,6 +224,11 @@ def render(
         compute_metrics: Optional; if True, the function will compute and return metrics. Default is False.
         compute_error_map: Optional; if True, the function will compute and return error maps. Default is False.
         vis_indices: Optional; if not None, the function will only render the specified indices. Default is None.
+        metrics_only: Optional; if True, skip buffering per-frame images for video
+            assembly so each frame's memory is freed immediately after its metrics
+            are computed. Used to evaluate full sets without OOMing on the frame buffer.
+            The returned RenderResults will contain only scalar metrics, no frames.
+            Default is False.
     """
     render_results = RenderResults()
     cam_names: List[Any] = []
@@ -261,79 +269,83 @@ def render(
 
             # ------------- rgb ------------- #
             rgb = results["rgb"]
-            render_results.append_frame("rgbs", get_numpy(rgb))
-            if "pixels" in image_infos:
-                render_results.append_frame("gt_rgbs", get_numpy(image_infos["pixels"]))
+            # When metrics_only, skip all per-frame image buffering used for video
+            # assembly. Each frame's memory is then freed at the end of this loop
+            # iteration, so we never hold the whole set in RAM (avoids OOM on full sets).
+            if not metrics_only:
+                render_results.append_frame("rgbs", get_numpy(rgb))
+                if "pixels" in image_infos:
+                    render_results.append_frame("gt_rgbs", get_numpy(image_infos["pixels"]))
 
-            green_background = torch.tensor([0.0, 177, 64]) / 255.0
-            green_background = green_background.to(rgb.device)
-            if "Background_rgb" in results:
-                Background_rgb = results["Background_rgb"] * results[
-                    "Background_opacity"
-                ] + green_background * (1 - results["Background_opacity"])
-                render_results.append_frame("Background_rgbs", get_numpy(Background_rgb))
-            if "RigidNodes_rgb" in results:
-                RigidNodes_rgb = results["RigidNodes_rgb"] * results[
-                    "RigidNodes_opacity"
-                ] + green_background * (1 - results["RigidNodes_opacity"])
-                render_results.append_frame("RigidNodes_rgbs", get_numpy(RigidNodes_rgb))
-            if "DeformableNodes_rgb" in results:
-                DeformableNodes_rgb = results["DeformableNodes_rgb"] * results[
-                    "DeformableNodes_opacity"
-                ] + green_background * (1 - results["DeformableNodes_opacity"])
-                render_results.append_frame("DeformableNodes_rgbs", get_numpy(DeformableNodes_rgb))
-            if "SMPLNodes_rgb" in results:
-                SMPLNodes_rgb = results["SMPLNodes_rgb"] * results[
-                    "SMPLNodes_opacity"
-                ] + green_background * (1 - results["SMPLNodes_opacity"])
-                render_results.append_frame("SMPLNodes_rgbs", get_numpy(SMPLNodes_rgb))
-            if "Dynamic_rgb" in results:
-                Dynamic_rgb = results["Dynamic_rgb"] * results[
-                    "Dynamic_opacity"
-                ] + green_background * (1 - results["Dynamic_opacity"])
-                render_results.append_frame("Dynamic_rgbs", get_numpy(Dynamic_rgb))
-            if compute_error_map:
-                error_map = (rgb - image_infos["pixels"]) ** 2
-                error_map = error_map.mean(dim=-1, keepdim=True)
-                error_map = (error_map - error_map.min()) / (error_map.max() - error_map.min())
-                error_map = error_map.repeat_interleave(3, dim=-1)
-                render_results.append_frame("rgb_error_maps", get_numpy(error_map))
-            if "rgb_sky_blend" in results:
-                render_results.append_frame("rgb_sky_blend", get_numpy(results["rgb_sky_blend"]))
-            if "rgb_sky" in results:
-                render_results.append_frame("rgb_sky", get_numpy(results["rgb_sky"]))
-            # ------------- depth ------------- #
-            depth = results["depth"]
-            render_results.append_frame("depths", get_numpy(depth))
-            # ------------- mask ------------- #
-            if "opacity" in results:
-                render_results.append_frame("opacities", get_numpy(results["opacity"]))
-            if "Background_depth" in results:
-                render_results.append_frame("Background_depths", get_numpy(results["Background_depth"]))
-                render_results.append_frame("Background_opacities", get_numpy(results["Background_opacity"]))
-            if "RigidNodes_depth" in results:
-                render_results.append_frame("RigidNodes_depths", get_numpy(results["RigidNodes_depth"]))
-                render_results.append_frame("RigidNodes_opacities", get_numpy(results["RigidNodes_opacity"]))
-            if "DeformableNodes_depth" in results:
-                render_results.append_frame("DeformableNodes_depths", get_numpy(results["DeformableNodes_depth"]))
-                render_results.append_frame("DeformableNodes_opacities", get_numpy(results["DeformableNodes_opacity"]))
-            if "SMPLNodes_depth" in results:
-                render_results.append_frame("SMPLNodes_depths", get_numpy(results["SMPLNodes_depth"]))
-                render_results.append_frame("SMPLNodes_opacities", get_numpy(results["SMPLNodes_opacity"]))
-            if "Dynamic_depth" in results:
-                render_results.append_frame("Dynamic_depths", get_numpy(results["Dynamic_depth"]))
-                render_results.append_frame("Dynamic_opacities", get_numpy(results["Dynamic_opacity"]))
-            if "sky_masks" in image_infos:
-                render_results.append_frame("gt_sky_masks", get_numpy(image_infos["sky_masks"]))
+                green_background = torch.tensor([0.0, 177, 64]) / 255.0
+                green_background = green_background.to(rgb.device)
+                if "Background_rgb" in results:
+                    Background_rgb = results["Background_rgb"] * results[
+                        "Background_opacity"
+                    ] + green_background * (1 - results["Background_opacity"])
+                    render_results.append_frame("Background_rgbs", get_numpy(Background_rgb))
+                if "RigidNodes_rgb" in results:
+                    RigidNodes_rgb = results["RigidNodes_rgb"] * results[
+                        "RigidNodes_opacity"
+                    ] + green_background * (1 - results["RigidNodes_opacity"])
+                    render_results.append_frame("RigidNodes_rgbs", get_numpy(RigidNodes_rgb))
+                if "DeformableNodes_rgb" in results:
+                    DeformableNodes_rgb = results["DeformableNodes_rgb"] * results[
+                        "DeformableNodes_opacity"
+                    ] + green_background * (1 - results["DeformableNodes_opacity"])
+                    render_results.append_frame("DeformableNodes_rgbs", get_numpy(DeformableNodes_rgb))
+                if "SMPLNodes_rgb" in results:
+                    SMPLNodes_rgb = results["SMPLNodes_rgb"] * results[
+                        "SMPLNodes_opacity"
+                    ] + green_background * (1 - results["SMPLNodes_opacity"])
+                    render_results.append_frame("SMPLNodes_rgbs", get_numpy(SMPLNodes_rgb))
+                if "Dynamic_rgb" in results:
+                    Dynamic_rgb = results["Dynamic_rgb"] * results[
+                        "Dynamic_opacity"
+                    ] + green_background * (1 - results["Dynamic_opacity"])
+                    render_results.append_frame("Dynamic_rgbs", get_numpy(Dynamic_rgb))
+                if compute_error_map:
+                    error_map = (rgb - image_infos["pixels"]) ** 2
+                    error_map = error_map.mean(dim=-1, keepdim=True)
+                    error_map = (error_map - error_map.min()) / (error_map.max() - error_map.min())
+                    error_map = error_map.repeat_interleave(3, dim=-1)
+                    render_results.append_frame("rgb_error_maps", get_numpy(error_map))
+                if "rgb_sky_blend" in results:
+                    render_results.append_frame("rgb_sky_blend", get_numpy(results["rgb_sky_blend"]))
+                if "rgb_sky" in results:
+                    render_results.append_frame("rgb_sky", get_numpy(results["rgb_sky"]))
+                # ------------- depth ------------- #
+                depth = results["depth"]
+                render_results.append_frame("depths", get_numpy(depth))
+                # ------------- mask ------------- #
+                if "opacity" in results:
+                    render_results.append_frame("opacities", get_numpy(results["opacity"]))
+                if "Background_depth" in results:
+                    render_results.append_frame("Background_depths", get_numpy(results["Background_depth"]))
+                    render_results.append_frame("Background_opacities", get_numpy(results["Background_opacity"]))
+                if "RigidNodes_depth" in results:
+                    render_results.append_frame("RigidNodes_depths", get_numpy(results["RigidNodes_depth"]))
+                    render_results.append_frame("RigidNodes_opacities", get_numpy(results["RigidNodes_opacity"]))
+                if "DeformableNodes_depth" in results:
+                    render_results.append_frame("DeformableNodes_depths", get_numpy(results["DeformableNodes_depth"]))
+                    render_results.append_frame("DeformableNodes_opacities", get_numpy(results["DeformableNodes_opacity"]))
+                if "SMPLNodes_depth" in results:
+                    render_results.append_frame("SMPLNodes_depths", get_numpy(results["SMPLNodes_depth"]))
+                    render_results.append_frame("SMPLNodes_opacities", get_numpy(results["SMPLNodes_opacity"]))
+                if "Dynamic_depth" in results:
+                    render_results.append_frame("Dynamic_depths", get_numpy(results["Dynamic_depth"]))
+                    render_results.append_frame("Dynamic_opacities", get_numpy(results["Dynamic_opacity"]))
+                if "sky_masks" in image_infos:
+                    render_results.append_frame("gt_sky_masks", get_numpy(image_infos["sky_masks"]))
 
-            # ------------- lidar ------------- #
-            if "lidar_depth_map" in image_infos:
-                depth_map = image_infos["lidar_depth_map"]
-                depth_img = depth_map.cpu().numpy()
-                depth_img = depth_visualizer(depth_img, depth_img > 0)
-                mask = (depth_map.unsqueeze(-1) > 0).cpu().numpy()
-                lidar_on_image = image_infos["pixels"].cpu().numpy() * (1 - mask) + depth_img * mask
-                render_results.append_frame("lidar_on_images", lidar_on_image)
+                # ------------- lidar ------------- #
+                if "lidar_depth_map" in image_infos:
+                    depth_map = image_infos["lidar_depth_map"]
+                    depth_img = depth_map.cpu().numpy()
+                    depth_img = depth_visualizer(depth_img, depth_img > 0)
+                    mask = (depth_map.unsqueeze(-1) > 0).cpu().numpy()
+                    lidar_on_image = image_infos["pixels"].cpu().numpy() * (1 - mask) + depth_img * mask
+                    render_results.append_frame("lidar_on_images", lidar_on_image)
 
             if compute_metrics:
                 psnr = compute_psnr(rgb, image_infos["pixels"])

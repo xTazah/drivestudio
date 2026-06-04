@@ -95,12 +95,16 @@ def do_evaluation(
         torch.cuda.empty_cache()
 
     if cfg.render.render_full:
+        # render_full_video=False -> compute/save metrics only, skip frame buffering
+        # (avoids OOM on large full sets) and skip the full-set video below.
+        full_video = cfg.render.get("render_full_video", True)
         logger.info("Evaluating Full Set...")
         render_results = render_images(
             trainer=trainer,
             dataset=dataset.full_image_set,
             compute_metrics=True,
             compute_error_map=cfg.render.vis_error,
+            metrics_only=not full_video,
         )
         try:
             if log_metrics:
@@ -130,8 +134,10 @@ def do_evaluation(
             # render_full_video decouples the full-set video from full-set metrics.
             # Defaults to True so existing configs behave exactly as before; set
             # render.render_full_video=False to compute/save metrics but skip the
-            # (memory-heavy, OOM-prone) full-set video rendering.
-            if cfg.render.get("render_full_video", True):
+            # (memory-heavy, OOM-prone) full-set video rendering. When False, the
+            # render_results above contain no frames (metrics_only), so save_videos
+            # is skipped here too.
+            if full_video:
                 if args.render_video_postfix is None:
                     video_output_pth = f"{cfg.log_dir}/videos{post_fix}/full_set_{step}.mp4"
                 else:

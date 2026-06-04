@@ -38,7 +38,6 @@ export LD_LIBRARY_PATH="/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}"
 #   cams = 1 (1-cam only for this rerun); method ∈ {OmniRe, B0, Mnoref, M}.
 # Order: per scene, train OmniRe -> B0 -> M-noref -> M; scene 327 then scene 552.
 QUEUE=(
-    "327|1|OmniRe"
     "327|1|B0"
     "327|1|Mnoref"
     "327|1|M"
