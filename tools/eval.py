@@ -127,26 +127,31 @@ def do_evaluation(
                     json.dump(eval_dict, f)
                 logger.info(f"Image evaluation metrics saved to {full_metrics_file}")
 
-            if args.render_video_postfix is None:
-                video_output_pth = f"{cfg.log_dir}/videos{post_fix}/full_set_{step}.mp4"
-            else:
-                video_output_pth = (
-                    f"{cfg.log_dir}/videos{post_fix}/full_set_{step}_{args.render_video_postfix}.mp4"
+            # render_full_video decouples the full-set video from full-set metrics.
+            # Defaults to True so existing configs behave exactly as before; set
+            # render.render_full_video=False to compute/save metrics but skip the
+            # (memory-heavy, OOM-prone) full-set video rendering.
+            if cfg.render.get("render_full_video", True):
+                if args.render_video_postfix is None:
+                    video_output_pth = f"{cfg.log_dir}/videos{post_fix}/full_set_{step}.mp4"
+                else:
+                    video_output_pth = (
+                        f"{cfg.log_dir}/videos{post_fix}/full_set_{step}_{args.render_video_postfix}.mp4"
+                    )
+                vis_frame_dict = save_videos(
+                    render_results,
+                    video_output_pth,
+                    layout=dataset.layout,
+                    num_timestamps=dataset.num_img_timesteps,
+                    keys=render_keys,
+                    num_cams=dataset.pixel_source.num_cams,
+                    save_seperate_video=cfg.logging.save_seperate_video,
+                    fps=cfg.render.fps,
+                    verbose=True,
                 )
-            vis_frame_dict = save_videos(
-                render_results,
-                video_output_pth,
-                layout=dataset.layout,
-                num_timestamps=dataset.num_img_timesteps,
-                keys=render_keys,
-                num_cams=dataset.pixel_source.num_cams,
-                save_seperate_video=cfg.logging.save_seperate_video,
-                fps=cfg.render.fps,
-                verbose=True,
-            )
-            if args.enable_wandb:
-                for k, v in vis_frame_dict.items():
-                    wandb.log({"image_rendering/full/" + k: wandb.Image(v)})
+                if args.enable_wandb:
+                    for k, v in vis_frame_dict.items():
+                        wandb.log({"image_rendering/full/" + k: wandb.Image(v)})
         finally:
             if hasattr(render_results, "cleanup"):
                 render_results.cleanup()

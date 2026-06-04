@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 # scripts/train_thesis_queue.sh
 #
-# Sequential overnight trainer for the thesis ablation table.
-# Queue: 2 scenes x 3 methods (B0 / M-noref / M) x 2 camera setups (1cam / 3cam) = 12 runs.
+# Sequential trainer for the thesis ablation table — NO train/test split rerun.
+# Queue: 2 scenes x 4 methods (OmniRe / B0 / M-noref / M) x 1 camera = 8 runs.
 # Run from repo root (/mnt/d/Git/drivestudio) inside the `drivestudio` conda env.
 #
-# Resumes after crash: if checkpoint_final.pth already exists for a (scene, method, cam) tuple,
-# that run is skipped. Per-run failures (e.g. CUDA OOM on 3-cam) are logged and the queue moves on.
+# Resumes after crash: if checkpoint_final.pth already exists for a (scene, method) tuple,
+# that run is skipped. Per-run failures (e.g. CUDA OOM) are logged and the queue moves on.
 #
-# Protocol (applied to all 12 runs):
+# Protocol (applied to all 8 runs):
 #   - Full scene (start=0, end=-1)
-#   - test_image_stride=10 (every 10th frame held out)
+#   - NO train/test split: test_image_stride=0  (all frames used for training)
 #   - Floater fix: depth.w=0.05, Background cull_alpha_thresh=0.01, cull_scale_thresh=0.3
 #   - preload_device=cpu (lets 8 GB VRAM fit)
+#   - NO videos rendered: no test-set video, no full-set video, no novel-view video.
+#     Full-image / dynamic-only / human-only / vehicle-only metrics ARE still computed
+#     and saved (metrics{,_eval}/images_full_*.json) via the render_full_video=False
+#     decoupling added to tools/eval.py.
 #
 # Usage:
 #   bash scripts/train_thesis_queue.sh             # run full queue
 #   bash scripts/train_thesis_queue.sh --dry-run   # print what would run, do nothing
-#   DISABLE_3CAM=1 bash scripts/train_thesis_queue.sh   # skip the 6 3-cam runs
 
 set -u  # error on unset vars; do NOT use -e because we want to continue past failures
 
@@ -32,19 +35,18 @@ export LD_LIBRARY_PATH="/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}"
 
 # --- queue config ---------------------------------------------------------
 # Each queue entry is: "scene_id|cams|method"
-#   cams ∈ {1, 3}; method ∈ {B0, Mnoref, M}.
-# Order: scene 23 1cam, scene 114 1cam, scene 23 3cam, scene 114 3cam.
-# Within each (scene, cam) block we train B0 -> M-noref -> M.
+#   cams = 1 (1-cam only for this rerun); method ∈ {OmniRe, B0, Mnoref, M}.
+# Order: per scene, train OmniRe -> B0 -> M-noref -> M; scene 327 then scene 552.
 QUEUE=(
     "327|1|OmniRe"
+    "327|1|B0"
+    "327|1|Mnoref"
+    "327|1|M"
     "552|1|OmniRe"
+    "552|1|B0"
+    "552|1|Mnoref"
+    "552|1|M"
 )
-
-# Allow `DISABLE_3CAM=1 bash scripts/...` to skip the 3-cam half.
-if [ "${DISABLE_3CAM:-0}" = "1" ]; then
-    QUEUE=( "${QUEUE[@]/*|3|*/}" )
-    QUEUE=( "${QUEUE[@]/}" )  # collapse empties
-fi
 
 DRY_RUN=0
 if [ "${1:-}" = "--dry-run" ]; then
@@ -52,19 +54,21 @@ if [ "${1:-}" = "--dry-run" ]; then
 fi
 
 # --- output paths ---------------------------------------------------------
+# New location/name for this no-split rerun so it does not collide with the
+# earlier test-split batches.
 RUN_BATCH_TS="$(date +%Y%m%d_%H%M%S)"
-BATCH_OUT="${HOME}/logs/thesis_batch_${RUN_BATCH_TS}"
+BATCH_OUT="${HOME}/logs/thesis_nosplit_batch_${RUN_BATCH_TS}"
 mkdir -p "$BATCH_OUT"
 SUMMARY_CSV="$BATCH_OUT/summary.csv"
-echo "run_idx,scene,cams,method,status,wall_seconds,full_psnr,human_psnr,vehicle_psnr,log_path" > "$SUMMARY_CSV"
+echo "run_idx,scene,cams,method,status,wall_seconds,full_psnr,full_ssim,full_lpips,dynamic_psnr,dynamic_ssim,human_psnr,human_ssim,vehicle_psnr,vehicle_ssim,log_path" > "$SUMMARY_CSV"
 
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 echo "================================================================"
-echo "Thesis-protocol training queue"
+echo "Thesis-protocol training queue (NO train/test split)"
 echo "Repo:      $REPO_ROOT"
 echo "Git SHA:   $GIT_SHA"
-echo "Batch:    $BATCH_OUT"
+echo "Batch:     $BATCH_OUT"
 echo "Queue size: ${#QUEUE[@]} runs"
 echo "Dry run:   $DRY_RUN"
 echo "Disk free: $(df -h "$REPO_ROOT" | awk 'NR==2 {print $4}')"
@@ -81,7 +85,6 @@ run_one() {
 
     # Resolve the dataset variant.
     # 1cam variants: 1cams_B0.yaml (B0), 1cams_M.yaml (M and M-noref), 1cams.yaml (OmniRe).
-    # 3cam variants: 3cams_B0.yaml (B0), 3cams_M.yaml (M and M-noref).
     local dataset_variant
     case "$method" in
         B0)            dataset_variant="waymo/${cams}cams_B0" ;;
@@ -99,11 +102,11 @@ run_one() {
         OmniRe)        config_file="configs/omnire.yaml"   ;;
     esac
 
-    # Run name & output paths.
+    # Run name & output paths. New project namespace for the no-split rerun.
     local pad_idx="$(printf '%02d' "$idx")"
-    local run_name="scene${scene}_${cams}cam_${method}_full"
-    local project_name="thesis_${cams}cam_${method}"
-    local output_root="${HOME}/logs/thesis_runs"
+    local run_name="scene${scene}_${cams}cam_${method}_nosplit"
+    local project_name="thesis_nosplit_${cams}cam_${method}"
+    local output_root="${HOME}/logs/thesis_nosplit_runs"
     local run_dir="$output_root/$project_name/$run_name"
     local run_log="$BATCH_OUT/${pad_idx}_${run_name}.log"
     local ckpt_final="$run_dir/checkpoint_final.pth"
@@ -118,12 +121,12 @@ run_one() {
     # Resume / skip logic.
     if [ -f "$ckpt_final" ]; then
         echo "[$idx/$total] SKIP — checkpoint_final.pth already exists."
-        echo "$idx,$scene,$cams,$method,SKIPPED,0,,,," >> "$SUMMARY_CSV"
+        echo "$idx,$scene,$cams,$method,SKIPPED,0,,,,,,,,,," >> "$SUMMARY_CSV"
         return 0
     fi
 
     # Build the CLI override list.
-    # --- shared overrides for all 12 runs ---
+    # --- shared overrides for all runs ---
     local cli_args=(
         "--config_file" "$config_file"
         "--output_root" "$output_root"
@@ -134,15 +137,21 @@ run_one() {
         "data.start_timestep=0"
         "data.end_timestep=-1"
         "data.preload_device=cpu"
-        "data.pixel_source.test_image_stride=10"
+        # NO train/test split: use every frame for training, hold out none.
+        "data.pixel_source.test_image_stride=0"
         # floater fix
         "trainer.losses.depth.w=0.05"
         "model.Background.ctrl.cull_alpha_thresh=0.01"
         "model.Background.ctrl.cull_scale_thresh=0.3"
-        # skip novel-view rendering at end of training (slow, not needed for thesis metrics)
+        # --- NO videos of any kind ---
+        # no test-set video (and there is no test set anyway with stride=0)
+        "render.render_test=False"
+        # still compute full-set metrics (full / dynamic / human / vehicle)...
+        "render.render_full=True"
+        # ...but skip the heavy full-set video that OOM-kills the server.
+        "render.render_full_video=False"
+        # no novel-view rendering
         "render.render_novel.traj_types=[]"
-        # skip full-set video rendering (OOM-kills server; test-split metrics already saved)
-        "render.render_full=False"
     )
 
     # --- method-specific overrides ---
@@ -153,7 +162,7 @@ run_one() {
     if [ "$DRY_RUN" = "1" ]; then
         echo "DRY RUN — would execute:"
         echo "    python tools/train.py ${cli_args[*]}"
-        echo "$idx,$scene,$cams,$method,DRY_RUN,0,,,," >> "$SUMMARY_CSV"
+        echo "$idx,$scene,$cams,$method,DRY_RUN,0,,,,,,,,,," >> "$SUMMARY_CSV"
         return 0
     fi
 
@@ -161,7 +170,7 @@ run_one() {
     local start_epoch
     start_epoch=$(date +%s)
     {
-        echo "==== thesis-batch run ${idx}/${total} ===="
+        echo "==== thesis-nosplit-batch run ${idx}/${total} ===="
         echo "Timestamp: $(date -Iseconds)"
         echo "Git SHA:   $GIT_SHA"
         echo "Command:   python tools/train.py ${cli_args[*]}"
@@ -179,17 +188,28 @@ run_one() {
     end_epoch=$(date +%s)
     local wall=$(( end_epoch - start_epoch ))
 
-    # Parse final eval metrics out of the log (best-effort).
-    local full_psnr human_psnr vehicle_psnr
-    full_psnr=$(grep -E "Full Image  PSNR:" "$run_log" | tail -n1 | awk '{print $NF}')
-    human_psnr=$(grep -E "Human-Only PSNR:"  "$run_log" | tail -n1 | awk '{print $NF}')
+    # Parse final eval metrics out of the log (best-effort). These lines come from
+    # models/video_utils.py render_images() and cover every metric group asked for:
+    #   Full Image PSNR/SSIM/LPIPS, Dynamic-Only PSNR/SSIM, Human-Only PSNR/SSIM,
+    #   Vehicle-Only PSNR/SSIM.
+    local full_psnr full_ssim full_lpips
+    local dynamic_psnr dynamic_ssim human_psnr human_ssim vehicle_psnr vehicle_ssim
+    full_psnr=$(grep -E "Full Image  PSNR:"  "$run_log" | tail -n1 | awk '{print $NF}')
+    full_ssim=$(grep -E "Full Image  SSIM:"  "$run_log" | tail -n1 | awk '{print $NF}')
+    full_lpips=$(grep -E "Full Image LPIPS:" "$run_log" | tail -n1 | awk '{print $NF}')
+    dynamic_psnr=$(grep -E "Dynamic-Only PSNR:" "$run_log" | tail -n1 | awk '{print $NF}')
+    dynamic_ssim=$(grep -E "Dynamic-Only SSIM:" "$run_log" | tail -n1 | awk '{print $NF}')
+    human_psnr=$(grep -E "Human-Only PSNR:"   "$run_log" | tail -n1 | awk '{print $NF}')
+    human_ssim=$(grep -E "Human-Only SSIM:"   "$run_log" | tail -n1 | awk '{print $NF}')
     vehicle_psnr=$(grep -E "Vehicle-Only PSNR:" "$run_log" | tail -n1 | awk '{print $NF}')
-    full_psnr="${full_psnr:-NA}"
-    human_psnr="${human_psnr:-NA}"
-    vehicle_psnr="${vehicle_psnr:-NA}"
+    vehicle_ssim=$(grep -E "Vehicle-Only SSIM:" "$run_log" | tail -n1 | awk '{print $NF}')
+    full_psnr="${full_psnr:-NA}";       full_ssim="${full_ssim:-NA}";       full_lpips="${full_lpips:-NA}"
+    dynamic_psnr="${dynamic_psnr:-NA}"; dynamic_ssim="${dynamic_ssim:-NA}"
+    human_psnr="${human_psnr:-NA}";     human_ssim="${human_ssim:-NA}"
+    vehicle_psnr="${vehicle_psnr:-NA}"; vehicle_ssim="${vehicle_ssim:-NA}"
 
-    echo "$idx,$scene,$cams,$method,$status,$wall,$full_psnr,$human_psnr,$vehicle_psnr,$run_log" >> "$SUMMARY_CSV"
-    echo "[$idx/$total] $status  wall=${wall}s  Full=$full_psnr  Human=$human_psnr  Veh=$vehicle_psnr"
+    echo "$idx,$scene,$cams,$method,$status,$wall,$full_psnr,$full_ssim,$full_lpips,$dynamic_psnr,$dynamic_ssim,$human_psnr,$human_ssim,$vehicle_psnr,$vehicle_ssim,$run_log" >> "$SUMMARY_CSV"
+    echo "[$idx/$total] $status  wall=${wall}s  Full=$full_psnr/$full_ssim/$full_lpips  Dyn=$dynamic_psnr/$dynamic_ssim  Human=$human_psnr/$human_ssim  Veh=$vehicle_psnr/$vehicle_ssim"
 }
 
 # --- main loop ------------------------------------------------------------
